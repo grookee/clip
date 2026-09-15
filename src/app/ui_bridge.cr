@@ -43,6 +43,9 @@ module Kirk::UIBridge
     c.verbose_logging = s.verbose_logging ? 1 : 0
 
     copy_wchars(c.encoder.to_unsafe, 260, s.hw_encoder)
+    copy_wchars(c.encoder_preset.to_unsafe, 64, s.encoder_preset)
+    c.max_width = s.max_width.to_u32
+    c.max_height = s.max_height.to_u32
     copy_wchars(c.mic_device.to_unsafe, 260, s.mic_device)
     copy_wchars(c.clips_dir.to_unsafe, 520, s.clips_dir)
     copy_wchars(c.clip_name_pattern.to_unsafe, 260, s.clip_name_pattern)
@@ -71,6 +74,12 @@ module Kirk::UIBridge
     t.voice_enabled = cc.voice_enabled != 0
     t.auto_start_recording = cc.auto_start_recording != 0
     t.hw_encoder = read_wchars(cc.encoder)
+    preset = read_wchars(cc.encoder_preset).strip
+    t.encoder_preset = preset.empty? ? "p4" : preset
+    mw = cc.max_width.to_i32
+    t.max_width = (mw == 0 || (mw >= 640 && mw <= 7680)) ? (mw // 2 * 2) : 0
+    mh = cc.max_height.to_i32
+    t.max_height = (mh == 0 || (mh >= 360 && mh <= 4320)) ? (mh // 2 * 2) : 0
     t.mic_device = read_wchars(cc.mic_device)
     t.clips_dir = read_wchars(cc.clips_dir)
     pat = read_wchars(cc.clip_name_pattern)

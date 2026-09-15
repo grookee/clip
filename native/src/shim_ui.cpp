@@ -372,6 +372,41 @@ static const wchar_t *enc_vals[] = {
 };
 static const int enc_count = 5;
 
+// Quality preset: generic names mapping onto per-encoder options in the
+// capture engine (NVENC p1..p7, AMF speed|balanced|quality, QSV/x264 names).
+// Last entry preserves a hand-edited kirk.yml value.
+static const wchar_t *quality_names[] = {
+  L"Performance (least lag)",
+  L"Fast",
+  L"Balanced (recommended)",
+  L"Good",
+  L"Quality (sharpest)",
+  L"Custom (kirk.yml)",
+};
+static const wchar_t *quality_vals[] = {
+  L"p1",
+  L"p3",
+  L"p4",
+  L"p5",
+  L"p7",
+  L"",
+};
+static const int quality_count = 6;
+
+// Resolution cap: downscale the capture before encoding. Native = full
+// desktop. 1080p is the sweet spot for AMD iGPUs / 4K desktops. Last entry
+// preserves hand-edited max_width/max_height from kirk.yml.
+static const wchar_t *res_names[] = {
+  L"Native (full desktop)",
+  L"720p (1280x720 or smaller)",
+  L"1080p (1920x1080 or smaller)",
+  L"1440p (2560x1440 or smaller)",
+  L"Custom (kirk.yml)",
+};
+static const int res_w[] = {0, 1280, 1920, 2560, -1};
+static const int res_h[] = {0, 720, 1080, 1440, -1};
+static const int res_count = 5;
+
 
 struct UI {
   HWND hwnd = nullptr;
@@ -399,7 +434,7 @@ struct UI {
   bool mouse_tracked = false;
 
   kirk_settings S;
-  int micSel = 0, encSel = 0;
+  int micSel = 0, encSel = 0, presetSel = 2, resSel = 0;
   bool fpsCustom = false, vbrCustom = false, abrCustom = false;
   int clientW = 0, clientH = 0;
 
@@ -810,7 +845,17 @@ static void ui_layout(UI *u) {
   u->f.back().items = new std::vector<std::wstring>();
   for (int i = 0; i < enc_count; i++) u->f.back().items->push_back(enc_names[i]);
   u->f.back().psel = &u->encSel;
-  add_info(3, L"Hardware encoder. Auto picks the best available.");
+  add_info(3, L"Hardware encoder. Auto picks the best available (NVENC > AMD AMF > QuickSync > CPU). On AMD, install Adrenalin drivers or AMF is missing and Auto falls back to laggy CPU encoding.");
+  push_row(FT_COMBO, 23, L"Quality preset");
+  u->f.back().items = new std::vector<std::wstring>();
+  for (int i = 0; i < quality_count; i++) u->f.back().items->push_back(quality_names[i]);
+  u->f.back().psel = &u->presetSel;
+  add_info(23, L"Encoding effort. Performance = least lag (NVENC p1, AMF speed, x264 ultrafast). Balanced is recommended.");
+  push_row(FT_COMBO, 24, L"Max resolution");
+  u->f.back().items = new std::vector<std::wstring>();
+  for (int i = 0; i < res_count; i++) u->f.back().items->push_back(res_names[i]);
+  u->f.back().psel = &u->resSel;
+  add_info(24, L"Downscale before encoding. Native 4K60 is heavy; 1080p fixes most lag with barely visible loss. Custom values can be set in kirk.yml.");
   end_card();
 
   begin_card(L"Audio / microphone");
@@ -1486,6 +1531,9 @@ static void ui_reset_defaults(UI *u) {
   u->S.verbose_logging = 0;
   u->S.auto_start_recording = 1;
   u->S.encoder[0] = 0;
+  wcsncpy_s(u->S.encoder_preset, 64, L"p4", _TRUNCATE);
+  u->S.max_width = 0;
+  u->S.max_height = 0;
   u->S.mic_device[0] = 0;
   u->S.clips_dir[0] = 0;
   wcsncpy_s(u->S.clip_name_pattern, KIRK_STR_LEN, L"clip-{timestamp}.mp4", _TRUNCATE);
@@ -1493,6 +1541,8 @@ static void ui_reset_defaults(UI *u) {
   u->S.hotkey_record_mod = 0; u->S.hotkey_record_vk = 0x78;
   u->S.hotkey_shot_mod = 0; u->S.hotkey_shot_vk = 0x79;
   u->encSel = 0;
+  u->presetSel = 2;
+  u->resSel = 0;
   u->micSel = 0;
   u->fpsCustom = false; u->vbrCustom = false; u->abrCustom = false;
   for (auto &fd : u->f) {
@@ -1566,6 +1616,16 @@ static void finish_dialog(UI *u, bool saved) {
       }
     }
     wcsncpy_s(u->S.encoder, KIRK_STR_LEN, enc_vals[u->encSel], _TRUNCATE);
+    // Custom (last) preserves a hand-edited kirk.yml value.
+    if (u->presetSel >= 0 && u->presetSel < quality_count - 1) {
+      wcsncpy_s(u->S.encoder_preset, 64, quality_vals[u->presetSel], _TRUNCATE);
+    } else if (u->S.encoder_preset[0] == 0) {
+      wcsncpy_s(u->S.encoder_preset, 64, L"p4", _TRUNCATE);
+    }
+    if (u->resSel >= 0 && u->resSel < res_count - 1) {
+      u->S.max_width = (uint32_t)res_w[u->resSel];
+      u->S.max_height = (uint32_t)res_h[u->resSel];
+    } // Custom (last) leaves S.max_* untouched.
     if (u->micSel <= 0) {
       u->S.mic_device[0] = 0;
     } else {
@@ -2465,6 +2525,24 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
   for (int i = 0; i < enc_count; i++) {
     if (wcscmp(initial->encoder, enc_vals[i]) == 0) { u->encSel = i; break; }
   }
+
+  // Quality preset: match stored value case-insensitively, else Custom.
+  u->presetSel = quality_count - 1;
+  if (initial->encoder_preset[0] == 0) {
+    u->presetSel = 2;  // empty = p4 Balanced
+    wcsncpy_s(u->S.encoder_preset, 64, L"p4", _TRUNCATE);
+  } else {
+    for (int i = 0; i < quality_count - 1; i++) {
+      if (_wcsicmp(initial->encoder_preset, quality_vals[i]) == 0) { u->presetSel = i; break; }
+    }
+  }
+
+  // Resolution cap: match stored dimensions, else Custom (preserves yml).
+  u->resSel = res_count - 1;
+  for (int i = 0; i < res_count - 1; i++) {
+    if ((int)initial->max_width == res_w[i] && (int)initial->max_height == res_h[i]) { u->resSel = i; break; }
+  }
+  if (initial->max_width == 0 && initial->max_height == 0) u->resSel = 0;
 
   g_ui = u;
 

@@ -105,6 +105,9 @@ typedef struct {
   int32_t  hotkey_shot_vk;
   int32_t  verbose_logging;               /* extra local debug logging */
   int32_t  auto_start_recording;          /* start replay capture at launch */
+  wchar_t  encoder_preset[64];            /* p1..p7 / speed|balanced|quality / x264 names; "" = p4 */
+  uint32_t max_width;                     /* 0 = native; otherwise downscale cap */
+  uint32_t max_height;                    /* 0 = native; otherwise downscale cap */
 } kirk_settings;
 
 /// Opens the settings dialog. Blocking modal loop; returns 1 on success.

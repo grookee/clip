@@ -496,7 +496,10 @@ module Kirk
                       old.segment_seconds != @cfg.segment_seconds ||
                       old.capture_audio != @cfg.capture_audio ||
                       old.mic_device != @cfg.mic_device ||
-                      old.hw_encoder != @cfg.hw_encoder
+                      old.hw_encoder != @cfg.hw_encoder ||
+                      old.encoder_preset != @cfg.encoder_preset ||
+                      old.max_width != @cfg.max_width ||
+                      old.max_height != @cfg.max_height
 
       if engine = @engine
         was_running = engine.capture_running?

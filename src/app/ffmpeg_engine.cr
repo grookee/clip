@@ -15,6 +15,8 @@ module Kirk
     @fps = 60_i32
     @bitrate_kbps = 8000_i32
     @encoder_preset = "p4"
+    @max_width = 0_i32
+    @max_height = 0_i32
     @hw_encoder = ""
     @capture_audio = true
     @mic_device = ""
@@ -47,6 +49,8 @@ module Kirk
       @fps = cfg.fps
       @bitrate_kbps = cfg.bitrate_kbps
       @encoder_preset = cfg.encoder_preset
+      @max_width = cfg.max_width
+      @max_height = cfg.max_height
       @hw_encoder = cfg.hw_encoder
       @capture_audio = cfg.capture_audio
       @mic_device = cfg.mic_device
@@ -64,6 +68,9 @@ module Kirk
     # has no NVIDIA GPU, and selecting it captures nothing). The 320x240
     # frame is deliberate: AMF rejects smaller ones (Init error 5).
     # Measured 15s peaks at 1440p60/8Mbps: libx264 916MB, h264_amf 163MB.
+    # On AMD cards this resolves to h264_amf; make sure Adrenalin drivers
+    # are installed (Windows Update drivers often lack AMF) or you will
+    # fall through to libx264 and see encoding lag.
     # An explicit hw_encoder setting always wins.
     private def encoder_usable?(enc : String) : Bool
       begin
@@ -103,12 +110,104 @@ module Kirk
       resolve_encoder
     end
 
+    private def nvenc_encoder?(enc : String) : Bool
+      enc == "h264_nvenc" || enc == "hevc_nvenc" || enc == "av1_nvenc"
+    end
+
+    private def amf_encoder?(enc : String) : Bool
+      enc == "h264_amf" || enc == "hevc_amf" || enc == "av1_amf"
+    end
+
+    private def qsv_encoder?(enc : String) : Bool
+      enc == "h264_qsv" || enc == "hevc_qsv" || enc == "av1_qsv"
+    end
+
+    # Maps the generic `encoder_preset` setting onto per-encoder options.
+    # NVENC understands p1..p7, AMF wants speed|balanced|quality, QSV and
+    # x264 have their own preset names — so a raw passthrough only ever
+    # worked for NVENC and silently fell back to ffmpeg defaults elsewhere.
+    private def preset_args(enc : String) : Array(String)
+      extra = Array(String).new
+      preset = (@encoder_preset || "p4").strip.downcase
+      preset = "p4" if preset.empty?
+
+      if nvenc_encoder?(enc)
+        p = %w[p1 p2 p3 p4 p5 p6 p7].includes?(preset) ? preset : "p4"
+        extra << "-preset" << p << "-tune" << "ll" << "-rc" << "cbr" << "-multipass" << "disabled"
+      elsif amf_encoder?(enc)
+        q = case preset
+            when "speed", "fast", "ultrafast", "superfast", "veryfast", "p1", "p2", "p3" then "speed"
+            when "quality", "slow", "slower", "veryslow", "p6", "p7"                     then "quality"
+            else                                                                              "balanced"
+            end
+        # ultralowlatency drops B-frames: less encoding lag while gaming.
+        extra << "-quality" << q << "-rc" << "cbr" << "-usage" << "ultralowlatency"
+        extra << "-vbaq" << "true" if q != "speed"
+      elsif qsv_encoder?(enc)
+        p = case preset
+            when "p1", "p2", "ultrafast", "superfast", "veryfast" then "veryfast"
+            when "p3", "p4", "faster"                             then "faster"
+            when "p5", "fast"                                     then "fast"
+            when "p6", "p7", "medium", "slow"                     then "medium"
+            when "slower", "veryslow"                             then "slower"
+            else                                                       "veryfast"
+            end
+        extra << "-preset" << p << "-look_ahead" << "0"
+      elsif enc == "libx264" || enc == "libx265"
+        p = case preset
+            when "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow" then preset
+            when "p1"                                                                                           then "ultrafast"
+            when "p2"                                                                                           then "superfast"
+            when "p3", "p4"                                                                                     then "veryfast"
+            when "p5"                                                                                           then "faster"
+            when "p6", "p7"                                                                                     then "fast"
+            else                                                                                                     "veryfast"
+            end
+        extra << "-preset" << p << "-tune" << "zerolatency"
+      end
+      extra
+    end
+
+    # Builds the -vf chain: mandatory hwdownload for every non-NVENC encoder
+    # (AMF rejects d3d11 input with SubmitInput error 18, measured) plus an
+    # optional downscale when max_width/max_height are set. The scale keeps
+    # aspect ratio and forces even dimensions for yuv420p.
+    private def video_filter(enc : String) : String?
+      parts = Array(String).new
+      needs_download = !nvenc_encoder?(enc)
+      parts << "hwdownload" << "format=bgra" if needs_download
+
+      mw = @max_width
+      mh = @max_height
+      if (mw && mw > 0) || (mh && mh > 0)
+        if mw && mw > 0 && mh && mh > 0
+          parts << "scale=w=#{mw}:h=#{mh}:force_original_aspect_ratio=decrease:flags=bilinear"
+          parts << "scale=ceil(iw/2)*2:ceil(ih/2)*2"
+        elsif mw && mw > 0
+          parts << "scale=w='min(iw\\,#{mw})':h=-2:flags=bilinear"
+        else
+          parts << "scale=w=-2:h='min(ih\\,#{mh})':flags=bilinear"
+        end
+        # NVENC takes d3d11 frames zero-copy; once we download+scale the
+        # frames are software, so normalize the pixel format in-filter
+        # instead of via -pix_fmt (which would be a second conversion).
+        parts << "format=yuv420p" if nvenc_encoder?(enc)
+      end
+
+      return nil if parts.empty?
+      parts.join(",")
+    end
+
     private def capture_args : Array(String)
       seg = @segment_seconds.not_nil!
       fps = @fps.not_nil!
 
       args = Array(String).new
-      args << "-hide_banner" << "-loglevel" << "error" << "-y"
+      # warning (not error) so lag signals reach ffmpeg.out.log: dropped
+      # frames, encoder queue full, real-time buffer full. Progress stats
+      # print at info level and would flood the rolling log, so stay one
+      # level below that.
+      args << "-hide_banner" << "-loglevel" << "warning" << "-stats" << "-y"
 
       vw = Win32.get_system_metrics(78)
       vh = Win32.get_system_metrics(79)
@@ -120,29 +219,26 @@ module Kirk
       if @capture_audio
         device = @mic_device
         if device && !device.empty?
-          args << "-f" << "dshow" << "-i" << "audio=#{device}"
+          # Buffered dshow input: without these a busy game thread starves
+          # the mic reader and ffmpeg aborts with "real-time buffer full".
+          args << "-thread_queue_size" << "512" << "-f" << "dshow" << "-rtbufsize" << "256M" << "-i" << "audio=#{device}"
         end
       end
 
-      # ddagrab yields d3d11 hardware frames. Only NVENC consumes them
-      # directly; AMF rejects d3d11 input (SubmitInput error 18, measured),
-      # so every other encoder downloads to system memory first (bgr0, the
-      # only format d3d11 download supports) and auto-scales from there.
       enc = encoder_name
-      if enc != "h264_nvenc" && enc != "hevc_nvenc" && enc != "av1_nvenc"
-        args << "-vf" << "hwdownload,format=bgra"
+      if vf = video_filter(enc)
+        args << "-vf" << vf
       end
 
       args << "-c:v" << enc
-      case enc
-      when "libx264", "libx265"
-        args << "-preset" << "veryfast"
-      end
+      preset_args(enc).each { |a| args << a }
       args << "-b:v" << "#{@bitrate_kbps}k"
       args << "-g" << (fps * seg).to_s # one segment per GOP, so every boundary is a keyframe
       # NVENC consumes the ddagrab d3d11 frames directly; forcing a software
       # pix_fmt would insert an impossible d3d11->yuv420p conversion.
-      if enc != "h264_nvenc" && enc != "hevc_nvenc" && enc != "av1_nvenc"
+      # (When scaling with NVENC the filter chain already ends in
+      # format=yuv420p, so no -pix_fmt is needed there either.)
+      if !nvenc_encoder?(enc)
         args << "-pix_fmt" << "yuv420p"
       end
 

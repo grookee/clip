@@ -98,6 +98,9 @@ struct KirkSettings
   property hotkey_shot_vk : Int32 = 0
   property verbose_logging : Int32 = 0
   property auto_start_recording : Int32 = 0
+  property encoder_preset : StaticArray(UInt16, 64) = StaticArray(UInt16, 64).new(0_u16)
+  property max_width : UInt32 = 0_u32
+  property max_height : UInt32 = 0_u32
 end
 
 class VoiceSession

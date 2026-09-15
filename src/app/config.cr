@@ -69,6 +69,22 @@ module Kirk
       self.replay_seconds = 30 if replay_seconds < 5 || replay_seconds > 600
       self.segment_seconds = 2 if segment_seconds < 1 || segment_seconds > 15
       self.storage_limit_gb = 20 if storage_limit_gb < 1 || storage_limit_gb > 500
+      # 0 = native resolution; otherwise clamp to sane even-friendly bounds.
+      # Odd widths break yuv420p, so force even below.
+      if max_width != 0 && (max_width < 640 || max_width > 7680)
+        self.max_width = 0
+      elsif max_width % 2 != 0
+        self.max_width -= 1
+      end
+      if max_height != 0 && (max_height < 360 || max_height > 4320)
+        self.max_height = 0
+      elsif max_height % 2 != 0
+        self.max_height -= 1
+      end
+      allowed_presets = %w[p1 p2 p3 p4 p5 p6 p7 speed balanced quality
+        ultrafast superfast veryfast faster fast medium
+        slow slower veryslow]
+      self.encoder_preset = "p4" unless allowed_presets.includes?(encoder_preset.strip.downcase)
       self.clip_name_pattern = "clip-{timestamp}.mp4" if clip_name_pattern.strip.empty?
       # The stale 0.60 default never fires where SAPI decodes at 0.017-0.041;
       # migrate exactly that value, leave explicit user values untouched.

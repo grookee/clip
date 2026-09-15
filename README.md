@@ -60,6 +60,9 @@ the main knobs:
 | `fps`                | capture framerate                        |
 | `bitrate_kbps`       | video bitrate                            |
 | `hw_encoder`         | `""` = auto, or `h264_nvenc` etc.        |
+| `encoder_preset`     | quality/speed: `p1`..`p7`, `speed`/`balanced`/`quality`, or x264 names |
+| `max_width`          | downscale cap, `0` = native (e.g. `1920`) |
+| `max_height`         | downscale cap, `0` = native (e.g. `1080`) |
 | `capture_audio`      | bake mic audio into clips                |
 | `mic_device`         | dshow mic, `""` = none                   |
 | `voice_enabled`      | voice commands on/off                    |
