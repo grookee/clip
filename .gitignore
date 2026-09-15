@@ -18,6 +18,10 @@
 # *.exp, diag logs, and the local kirk.yml copy.
 /build/
 
+# MSIX staging + packed installers (scripts/build_msix.ps1).
+/dist/
+*.msix
+
 # MSVC / C++ intermediates, in case anyone compiles outside build/.
 *.obj
 *.pdb
