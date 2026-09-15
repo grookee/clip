@@ -34,6 +34,7 @@ module Kirk
     @buffer : BufferManager?
     @storage : StorageManager?
     @cfg : Settings
+    @settings_path : String
     @log_io : IO?
     @log_backend : Log::IOBackend?
     @recording = false
@@ -42,13 +43,14 @@ module Kirk
     @voice_polls = 0_i64
     @house_ticks = 0_i64
 
-    def self.new(cfg : Settings) : self
-      allocate.tap { |a| a.initialize(cfg) }
+    def self.new(cfg : Settings, settings_path : String) : self
+      allocate.tap { |a| a.initialize(cfg, settings_path) }
     end
 
-    def initialize(cfg : Settings)
+    def initialize(cfg : Settings, settings_path : String)
       @cfg = cfg
-      @first_run = !File.exists?("kirk.yml")
+      @settings_path = settings_path
+      @first_run = !File.exists?(settings_path)
       local = ENV["LOCALAPPDATA"]? || ENV["USERPROFILE"]? || "."
       base = File.join(local, "kirk")
       @dirs = {
@@ -472,7 +474,7 @@ module Kirk
 
         begin
           UIBridge.apply_from_cc(pointerof(@cfg), ptr.as(KirkSettings*).value)
-          @cfg.save("kirk.yml")
+          @cfg.save(@settings_path)
           apply_settings_live(old)
           Log.info { "settings: saved + applied" }
         rescue ex

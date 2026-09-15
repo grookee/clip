@@ -80,6 +80,30 @@ module Kirk
       self
     end
 
+    # Production settings location: %LOCALAPPDATA%\kirk\kirk.yml. The
+    # install dir (and the process cwd under MSIX) is read-only, so a
+    # cwd-relative config breaks once packaged.
+    LEGACY_SETTINGS_PATH = "kirk.yml"
+
+    def self.default_path : String
+      local = ENV["LOCALAPPDATA"]? || ENV["USERPROFILE"]? || "."
+      File.join(local, "kirk", "kirk.yml")
+    end
+
+    # One-time copy of a dev-install ./kirk.yml to the production path.
+    # The legacy file is left in place, never deleted.
+    def self.migrate_legacy!(path : String)
+      return if File.exists?(path)
+      return unless File.exists?(LEGACY_SETTINGS_PATH)
+      begin
+        Dir.mkdir_p(File.dirname(path))
+        File.copy(LEGACY_SETTINGS_PATH, path)
+        Log.info { "config: migrated legacy ./kirk.yml to #{path}" }
+      rescue ex
+        Log.warn { "config: legacy migration failed: #{ex.message}" }
+      end
+    end
+
     def self.load(path : String) : Settings
       return Settings.new unless File.exists?(path)
       begin

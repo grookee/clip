@@ -16,6 +16,8 @@ Win32.detach_console
 # Must run before any window is created, or the dialog is bitmap-upscaled.
 LibShim.kirk_ui_init_dpi
 
-cfg = Kirk::Settings.load("kirk.yml")
-app = Kirk::Application.new(cfg)
+settings_path = Kirk::Settings.default_path
+Kirk::Settings.migrate_legacy!(settings_path)
+cfg = Kirk::Settings.load(settings_path)
+app = Kirk::Application.new(cfg, settings_path)
 exit app.run
