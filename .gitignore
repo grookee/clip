@@ -1,0 +1,69 @@
+# kirk — Keep It Recorded, Kirk
+# Crystal + native C/C++ shim (MSVC) + PowerShell build scripts.
+# Vendored FFmpeg runtime lives under vendor/ (see note below).
+
+# ---- Crystal / shards ----
+# `shards install` restores this from shard.yml + shard.lock.
+/lib/
+.shards/
+.crystal/
+# `crystal docs` output.
+/docs/
+# Native debug symbols next to the binary.
+*.dwarf
+
+# ---- Build output ----
+# scripts/build.ps1 + scripts/build_shim.ps1 emit everything here:
+# kirk.exe, shim.dll/shim.lib, staged vendor ffmpeg DLLs, *.obj, *.pdb,
+# *.exp, diag logs, and the local kirk.yml copy.
+/build/
+
+# MSVC / C++ intermediates, in case anyone compiles outside build/.
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.iobj
+*.ipdb
+*.pch
+[Dd]ebug/
+[Rr]elease/
+x64/
+out/
+
+# ---- Vendored third-party binaries ----
+# Full FFmpeg shared build (~hundreds of MB incl. the .7z in
+# vendor/downloads/). Not source: re-download separately; scripts/build.ps1
+# stages it next to kirk.exe when present and still builds without it
+# (ffmpeg is then resolved from PATH / KIRK_FFMPEG).
+/vendor/
+
+# ---- Local runtime artifacts (NOT the logging feature itself) ----
+# kirk's verbose local logging writes log FILES (kirk.log, ffmpeg.out.log,
+# keyboard diagnostics); ignore the files, never the logging code.
+*.log
+# Settings.save writes ./kirk.yml at runtime (machine-specific mic device,
+# paths, hotkeys). Defaults live in src/app/config.cr; shard.yml is the
+# project manifest and MUST stay tracked.
+kirk.yml
+
+# ---- OS cruft ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- IDE / editor (user-specific) ----
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# ---- Secrets / signing (never commit private keys or certificates) ----
+*.pfx
+*.p12
+*.snk
+*.key
+.env
