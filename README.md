@@ -94,4 +94,4 @@ scripts/             builds, msix packager, keyboard diagnostic
 
 ## license
 
-mit — see `shard.yml`.
+[GPLv3](LICENSE)
