@@ -1,0 +1,22 @@
+name: kirk
+version: 0.1.0
+description: |
+  kirk - Keep It Recorded, Kirk - a tiny, native-feeling, privacy-first
+  gameplay clipping utility. Saves the last N seconds of gameplay instantly
+  via hotkey (F8) or a local voice command ("Kirk, clip that!").
+
+crystal: ">= 1.13.0"
+
+license: MIT
+
+authors:
+  - kirk
+
+targets:
+  kirk:
+    main: src/kirk.cr
+
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
+    version: "~> 1.6"
