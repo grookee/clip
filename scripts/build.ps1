@@ -20,9 +20,27 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root $OutDir
-$Vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+# Locate vcvars64.bat: $env:VCVARS_PATH wins, then vswhere, then the usual
+# 2022 edition paths. GitHub's windows-latest runner ships Enterprise, not
+# BuildTools, so a hardcoded path breaks CI.
+function Find-Vcvars {
+  if ($env:VCVARS_PATH -and (Test-Path $env:VCVARS_PATH)) { return $env:VCVARS_PATH }
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+  if (Test-Path $vswhere) {
+    $found = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvars64.bat' 2>$null |
+      Select-Object -First 1
+    if ($found -and (Test-Path $found)) { return $found }
+  }
+  foreach ($edition in @('BuildTools', 'Enterprise', 'Professional', 'Community')) {
+    foreach ($pf in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+      $candidate = Join-Path $pf "Microsoft Visual Studio\2022\$edition\VC\Auxiliary\Build\vcvars64.bat"
+      if (Test-Path $candidate) { return $candidate }
+    }
+  }
+  throw 'vcvars64.bat not found (set $env:VCVARS_PATH to override)'
+}
 
-if (-not (Test-Path $Vcvars)) { throw "vcvars64.bat not found: $Vcvars" }
+$Vcvars = Find-Vcvars
 
 # 1. Native shim (does its own vcvars handling internally).
 & (Join-Path $PSScriptRoot "build_shim.ps1") -OutDir $OutDir
@@ -40,8 +58,13 @@ if ($LASTEXITCODE -ne 0) { throw "crystal build failed" }
 
 # 3. Stage vendor ffmpeg next to kirk.exe (exe-dir lookup) if missing, then
 #    headless-patch it (see below).
-$vendorBin = Join-Path $Root "vendor\ffmpeg-9.0.1-full_build-shared\bin"
-if ((-not (Test-Path (Join-Path $BuildDir "ffmpeg.exe"))) -and (Test-Path $vendorBin)) {
+# Any ffmpeg-*-shared drop (the versioned dir name moves with upstream
+# releases; vendor/ itself is gitignored and fetched by CI).
+$vendorBin = Get-ChildItem (Join-Path $Root 'vendor') -Directory -Filter 'ffmpeg-*' -ErrorAction SilentlyContinue |
+  ForEach-Object { Join-Path $_.FullName 'bin' } |
+  Where-Object { Test-Path $_ } |
+  Select-Object -First 1
+if ($vendorBin -and (-not (Test-Path (Join-Path $BuildDir "ffmpeg.exe")))) {
   Copy-Item (Join-Path $vendorBin "*") $BuildDir -Force
   Write-Host "Staged vendor ffmpeg into $BuildDir"
 }
@@ -55,7 +78,9 @@ if ((-not (Test-Path (Join-Path $BuildDir "ffmpeg.exe"))) -and (Test-Path $vendo
 #    file/pipe redirects. Vendor original under vendor\ is left untouched.
 $ffExe = Join-Path $BuildDir "ffmpeg.exe"
 if (Test-Path $ffExe) {
-  $editbin = Get-ChildItem "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC" -Recurse -Filter editbin.exe -ErrorAction SilentlyContinue |
+  # editbin lives under the same VS install that provided vcvars.
+  $vcDir = Split-Path (Split-Path (Split-Path $Vcvars -Parent) -Parent) -Parent
+  $editbin = Get-ChildItem (Join-Path $vcDir 'Tools\MSVC') -Recurse -Filter editbin.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match "Hostx64\\x64" } |
     Sort-Object FullName -Descending | Select-Object -First 1
   if ($editbin) {

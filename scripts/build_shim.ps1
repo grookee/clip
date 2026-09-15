@@ -4,11 +4,29 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+# Locate vcvars64.bat: $env:VCVARS_PATH wins, then vswhere, then the usual
+# 2022 edition paths. GitHub's windows-latest runner ships Enterprise, not
+# BuildTools, so a hardcoded path breaks CI.
+function Find-Vcvars {
+  if ($env:VCVARS_PATH -and (Test-Path $env:VCVARS_PATH)) { return $env:VCVARS_PATH }
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+  if (Test-Path $vswhere) {
+    $found = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvars64.bat' 2>$null |
+      Select-Object -First 1
+    if ($found -and (Test-Path $found)) { return $found }
+  }
+  foreach ($edition in @('BuildTools', 'Enterprise', 'Professional', 'Community')) {
+    foreach ($pf in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+      $candidate = Join-Path $pf "Microsoft Visual Studio\2022\$edition\VC\Auxiliary\Build\vcvars64.bat"
+      if (Test-Path $candidate) { return $candidate }
+    }
+  }
+  throw 'vcvars64.bat not found (set $env:VCVARS_PATH to override)'
+}
+
+$Vcvars = Find-Vcvars
 $Native = Join-Path $PSScriptRoot "..\native"
 $Root   = Join-Path $PSScriptRoot ".."
-
-if (-not (Test-Path $Vcvars)) { throw "vcvars64.bat not found: $Vcvars" }
 
 $fullOut = Join-Path $Root $OutDir
 New-Item -ItemType Directory -Force -Path $fullOut | Out-Null
