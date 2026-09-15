@@ -18,7 +18,7 @@ module Kirk
     getter enabled : Bool
 
     @grammar_path : String
-    @last_fire_ms : Int64 = 0
+    @last_fire : Time::Instant? = nil
     @cooldown_ms : Int32
     @confidence_min : Float64
 
@@ -161,13 +161,15 @@ module Kirk
       end
       Log.debug { "voice: '#{phrase}' conf=#{confidence.round(3)}" }
 
-      now = Time.monotonic.total_milliseconds.to_i64
-      if now - @last_fire_ms < @cooldown_ms
-        Log.debug { "voice: ignored (cooldown)" }
-        return Action::None
+      now = Time.instant
+      if last = @last_fire
+        if (now - last).total_milliseconds < @cooldown_ms
+          Log.debug { "voice: ignored (cooldown)" }
+          return Action::None
+        end
       end
 
-      @last_fire_ms = now
+      @last_fire = now
       match_action(phrase)
     end
 
