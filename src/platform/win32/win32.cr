@@ -40,6 +40,7 @@ module Win32
     fun GetTickCount64 : UInt64
     fun FreeConsole : BOOL
     fun Sleep(ms : DWORD) : Void
+    fun CreateMutexW(attr : Void*, owner : BOOL, name : WCHAR*) : HANDLE
   end
 
   struct SYSTEMTIME
@@ -144,6 +145,16 @@ module Win32
     n = Kernel32.FormatMessageW(0x00001000_u32, nil, Kernel32.GetLastError, 0, buf, 512, nil)
     return "unknown error" if n == 0
     String.from_utf16(Slice.new(buf.to_unsafe, n.to_i32)).strip
+  end
+
+  # Claims a session-local named mutex held for the life of the process.
+  # Returns false when another kirk instance already holds it
+  # (GetLastError 183). The handle is intentionally never closed; the OS
+  # releases it on process exit, so a crashed predecessor never wedges us.
+  def self.claim_single_instance(name : String) : Bool
+    h = Kernel32.CreateMutexW(nil, 1_i32, name.to_utf16.to_unsafe)
+    return false if h.null?
+    Kernel32.GetLastError != 183_u32
   end
 
   def self.wstr_to_string(ptr : WCHAR*) : String
