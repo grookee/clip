@@ -22,6 +22,7 @@ module Kirk
 
     @proc : Process?
     @err_io : File?
+    @resolved_encoder : String? = nil
 
     def initialize(@buffer_dir)
       @segment_pat = File.join(@buffer_dir, "seg_%05d.ts")
@@ -50,15 +51,56 @@ module Kirk
       @capture_audio = cfg.capture_audio
       @mic_device = cfg.mic_device
       @audio_bitrate_kbps = cfg.audio_bitrate_kbps
+      @resolved_encoder = nil
     end
 
     def cycle_segments : Int32
       (@replay_seconds.not_nil! // @segment_seconds.not_nil!) + 2
     end
 
+    # Empty hw_encoder means auto: nvenc > amf > qsv > libx264, probed once
+    # and cached. The probe test-encodes: listing an encoder in -encoders
+    # only means the binary supports it (this AMD box lists h264_nvenc but
+    # has no NVIDIA GPU, and selecting it captures nothing). The 320x240
+    # frame is deliberate: AMF rejects smaller ones (Init error 5).
+    # Measured 15s peaks at 1440p60/8Mbps: libx264 916MB, h264_amf 163MB.
+    # An explicit hw_encoder setting always wins.
+    private def encoder_usable?(enc : String) : Bool
+      begin
+        status = Process.run(@ffmpeg_path,
+          ["-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "nullsrc=s=320x240:r=10:d=1",
+           "-c:v", enc, "-f", "null", "-"],
+          output: Process::Redirect::Close, error: Process::Redirect::Close)
+        status.success?
+      rescue
+        false
+      end
+    end
+
+    private def resolve_encoder : String
+      if r = @resolved_encoder
+        return r
+      end
+      forced = @hw_encoder
+      if forced && !forced.empty?
+        @resolved_encoder = forced
+        return forced
+      end
+      found = "libx264"
+      ["h264_nvenc", "h264_amf", "h264_qsv"].each do |candidate|
+        if encoder_usable?(candidate)
+          found = candidate
+          break
+        end
+      end
+      Log.info { "capture encoder: #{found}#{found == "libx264" ? " (no usable hardware encoder)" : " (auto-selected)"}" }
+      @resolved_encoder = found
+      found
+    end
+
     private def encoder_name : String
-      e = @hw_encoder
-      e.nil? || e.empty? ? "libx264" : e
+      resolve_encoder
     end
 
     private def capture_args : Array(String)
@@ -82,11 +124,15 @@ module Kirk
         end
       end
 
-      # ddagrab yields d3d11 hardware frames; d3d11 download only supports
-      # bgr0, then the encoder auto-scales.
-      args << "-vf" << "hwdownload,format=bgra"
-
+      # ddagrab yields d3d11 hardware frames. Only NVENC consumes them
+      # directly; AMF rejects d3d11 input (SubmitInput error 18, measured),
+      # so every other encoder downloads to system memory first (bgr0, the
+      # only format d3d11 download supports) and auto-scales from there.
       enc = encoder_name
+      if enc != "h264_nvenc" && enc != "hevc_nvenc" && enc != "av1_nvenc"
+        args << "-vf" << "hwdownload,format=bgra"
+      end
+
       args << "-c:v" << enc
       case enc
       when "libx264", "libx265"
