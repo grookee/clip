@@ -113,7 +113,7 @@ module Kirk
       wc.lpfn_wnd_proc = ->Application.wnd_proc(Win32::HWND, UInt32, Win32::WPARAM, Win32::LPARAM)
       wc.h_instance = Win32.get_module_handle
       class_name = "KirkHidden"
-      wc.lpsz_class_name = class_name.to_utf16.to_unsafe
+      wc.lpsz_class_name = Win32.to_wstr(class_name)
       wc.h_cursor = Win32.load_cursor(Pointer(Void).null, 32512_u32) # IDC_ARROW
 
       if Win32.register_class(pointerof(wc)) == 0
@@ -121,7 +121,7 @@ module Kirk
         return 1
       end
 
-      hwnd = Win32.create_window(Win32.get_module_handle, class_name.to_utf16.to_unsafe, 0, 0, 0, 0)
+      hwnd = Win32.create_window(Win32.get_module_handle, Win32.to_wstr(class_name), 0, 0, 0, 0)
       if hwnd.null?
         Log.fatal { "CreateWindow failed: #{Win32.get_last_error_message}" }
         return 1
@@ -544,7 +544,7 @@ module Kirk
       end
 
       exe = "\"#{Win32.executable_path}\""
-      LibShim.kirk_set_run_at_startup(exe.to_utf16.to_unsafe, @cfg.run_at_startup ? 1 : 0)
+      LibShim.kirk_set_run_at_startup(Win32.to_wstr(exe), @cfg.run_at_startup ? 1 : 0)
     end
 
     private def restart_voice

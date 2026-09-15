@@ -152,7 +152,7 @@ module Win32
   # (GetLastError 183). The handle is intentionally never closed; the OS
   # releases it on process exit, so a crashed predecessor never wedges us.
   def self.claim_single_instance(name : String) : Bool
-    h = Kernel32.CreateMutexW(nil, 1_i32, name.to_utf16.to_unsafe)
+    h = Kernel32.CreateMutexW(nil, 1_i32, to_wstr(name))
     return false if h.null?
     Kernel32.GetLastError != 183_u32
   end
@@ -166,11 +166,20 @@ module Win32
     String.from_utf16(Slice.new(ptr, len))
   end
 
-  def self.string_to_wstring(s : String) : WCHAR*
+  # Copies s as null-terminated UTF-16 for Win32 calls. String#to_utf16
+  # has NO terminator, so passing its .to_unsafe directly over-reads into
+  # heap garbage (tray menu CJK suffixes, flaky voice grammar/screenshot
+  # paths). The copy is GC-managed and outlives the call.
+  def self.to_wstr(s : String) : WCHAR*
     u16 = s.to_utf16
-    ptr = Pointer(WCHAR).malloc(u16.size)
+    ptr = Pointer(WCHAR).malloc(u16.size + 1)
     ptr.copy_from(u16.to_unsafe, u16.size)
+    ptr[u16.size] = 0_u16
     ptr
+  end
+
+  def self.string_to_wstring(s : String) : WCHAR*
+    to_wstr(s)
   end
 
   def self.dup_string(ptr : WCHAR*) : String
@@ -293,9 +302,7 @@ module Win32
   end
 
   def self.open_folder(path : String)
-    base = path.to_utf16
-    op = "open".to_utf16
-    Shell32.ShellExecuteW(nil, op.to_unsafe, base.to_unsafe, nil, nil, 1)
+    Shell32.ShellExecuteW(nil, to_wstr("open"), to_wstr(path), nil, nil, 1)
   end
 
   def self.timestamp : String
@@ -421,7 +428,7 @@ module Win32
               clsid = UInt8.static_array(0x06_u8, 0xF4_u8, 0x7C_u8, 0x55_u8, 0x04_u8, 0x1A_u8,
                 0xD3_u8, 0x11_u8, 0x9A_u8, 0x73_u8, 0x00_u8, 0x00_u8,
                 0xF8_u8, 0x1E_u8, 0xF3_u8, 0x2E_u8)
-              ok = GdiPlus.GdipSaveImageToFile(bitmap, path.to_utf16.to_unsafe, clsid.to_unsafe, nil) == 0
+              ok = GdiPlus.GdipSaveImageToFile(bitmap, to_wstr(path), clsid.to_unsafe, nil) == 0
               GdiPlus.GdipDisposeImage(bitmap)
             end
           end

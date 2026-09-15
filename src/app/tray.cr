@@ -51,7 +51,10 @@ module Kirk
       n.n_cb_size = sizeof(Win32::NOTIFYICONDATAW).to_u32
       n.n_owner = @hwnd
       n.n_u_id = 1_u32
-      n.n_u_flags = NIF_INFO | NIF_ICON
+      # NIF_INFO only: including NIF_ICON with a null hIcon is the documented
+      # way to DELETE the icon, which is how the tray icon vanished right
+      # after add() set it.
+      n.n_u_flags = NIF_INFO
       n.n_info_flags = 1_u32 # NIIF_INFO
 
       t = title.to_utf16

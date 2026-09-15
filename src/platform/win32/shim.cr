@@ -116,7 +116,7 @@ class VoiceSession
 
   def load_grammar(path : String) : Bool
     h = native_handle!
-    LibShim.kirk_voice_load_grammar(h, path.to_utf16.to_unsafe) == 0
+    LibShim.kirk_voice_load_grammar(h, Win32.to_wstr(path)) == 0
   end
 
   def start : Bool
@@ -203,7 +203,7 @@ def win32_voice_create(device_hint : String? = nil) : VoiceSession
     if hint.strip.empty?
       h = LibShim.kirk_voice_create(nil)
     else
-      h = LibShim.kirk_voice_create(hint.to_utf16.to_unsafe)
+      h = LibShim.kirk_voice_create(Win32.to_wstr(hint))
     end
   else
     h = LibShim.kirk_voice_create(nil)
