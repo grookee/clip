@@ -20,6 +20,12 @@ module Kirk
       Dir.glob(File.join(@dir, "seg_*.ts").gsub('\\', '/')).sort
     end
 
+    # Audio-only segments from the companion capture process (same cadence,
+    # tail-alignable with `segments`).
+    def audio_segments : Array(String)
+      Dir.glob(File.join(@dir, "aud_*.ts").gsub('\\', '/')).sort
+    end
+
     # Everything except the newest entry, which ffmpeg may still be writing.
     def safe_segments : Array(String)
       s = segments
@@ -29,14 +35,26 @@ module Kirk
     # Remove files that fall outside the replay window. Returns the count
     # of pruned files.
     def prune : Int32
+      pruned = 0
       s = segments
       excess = s.size - @capacity
-      return 0 if excess <= 0
-      s[0...excess].each do |f|
-        File.delete(f) rescue nil
-        Log.debug { "pruned segment #{File.basename(f)}" }
+      if excess > 0
+        s[0...excess].each do |f|
+          File.delete(f) rescue nil
+          Log.debug { "pruned segment #{File.basename(f)}" }
+        end
+        pruned += excess
       end
-      excess
+      a = audio_segments
+      aexcess = a.size - @capacity
+      if aexcess > 0
+        a[0...aexcess].each do |f|
+          File.delete(f) rescue nil
+          Log.debug { "pruned audio segment #{File.basename(f)}" }
+        end
+        pruned += aexcess
+      end
+      pruned
     end
   end
 end

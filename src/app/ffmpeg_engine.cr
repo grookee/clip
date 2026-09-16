@@ -8,6 +8,7 @@ module Kirk
   class FFmpegEngine
     getter buffer_dir : String
     getter segment_pat : String
+    getter audio_pat : String
     property ffmpeg_path : String
 
     @replay_seconds = 30_i32
@@ -24,10 +25,15 @@ module Kirk
 
     @proc : Process?
     @err_io : File?
+    @audio_proc : Process?
+    @audio_err_io : File?
     @resolved_encoder : String? = nil
+    @gpu_family = Hash(String, String).new
+    @gpu_probed_at = Hash(String, Time).new
 
     def initialize(@buffer_dir)
       @segment_pat = File.join(@buffer_dir, "seg_%05d.ts")
+      @audio_pat = File.join(@buffer_dir, "aud_%05d.ts")
       @ffmpeg_path = FFmpegEngine.locate_ffmpeg
       Log.info { "ffmpeg binary: #{@ffmpeg_path}" }
     end
@@ -56,6 +62,8 @@ module Kirk
       @mic_device = cfg.mic_device
       @audio_bitrate_kbps = cfg.audio_bitrate_kbps
       @resolved_encoder = nil
+      @gpu_family.clear
+      @gpu_probed_at.clear
     end
 
     def cycle_segments : Int32
@@ -141,7 +149,12 @@ module Kirk
             else                                                                              "balanced"
             end
         # ultralowlatency drops B-frames: less encoding lag while gaming.
+        # It also disables periodic IDR frames (infinite GOP), so the
+        # segment muxer below would never see a splittable keyframe and the
+        # buffer would sit at a single ever-growing seg_00000.ts.
+        # forced_idr turns every forced I-frame into a real IDR.
         extra << "-quality" << q << "-rc" << "cbr" << "-usage" << "ultralowlatency"
+        extra << "-forced_idr" << "true"
         extra << "-vbaq" << "true" if q != "speed"
       elsif qsv_encoder?(enc)
         p = case preset
@@ -168,34 +181,156 @@ module Kirk
       extra
     end
 
-    # Builds the -vf chain: mandatory hwdownload for every non-NVENC encoder
-    # (AMF rejects d3d11 input with SubmitInput error 18, measured) plus an
-    # optional downscale when max_width/max_height are set. The scale keeps
-    # aspect ratio and forces even dimensions for yuv420p.
-    private def video_filter(enc : String) : String?
-      parts = Array(String).new
-      needs_download = !nvenc_encoder?(enc)
-      parts << "hwdownload" << "format=bgra" if needs_download
-
-      mw = @max_width
-      mh = @max_height
-      if (mw && mw > 0) || (mh && mh > 0)
-        if mw && mw > 0 && mh && mh > 0
-          parts << "scale=w=#{mw}:h=#{mh}:force_original_aspect_ratio=decrease:flags=bilinear"
-          parts << "scale=ceil(iw/2)*2:ceil(ih/2)*2"
-        elsif mw && mw > 0
-          parts << "scale=w='min(iw\\,#{mw})':h=-2:flags=bilinear"
-        else
-          parts << "scale=w=-2:h='min(ih\\,#{mh})':flags=bilinear"
+    # Concrete downscale target (even, aspect-preserved) or nil = native.
+    # Computed in Crystal rather than with filter expressions so the GPU
+    # chains below get exact dimensions. Mirrors the old filter logic: fit
+    # inside the max box, shrink-only, force even for yuv420p.
+    private def downscale_target(vw : Int32, vh : Int32) : Tuple(Int32, Int32)?
+      mw = @max_width || 0
+      mh = @max_height || 0
+      return nil if mw <= 0 && mh <= 0
+      return nil if vw <= 0 || vh <= 0
+      tw = vw
+      th = vh
+      if mw > 0 && mh > 0
+        s = Math.min(mw.to_f / vw, mh.to_f / vh)
+        if s < 1.0
+          tw = (vw * s).to_i & ~1
+          th = (vh * s).to_i & ~1
         end
+      elsif mw > 0
+        if vw > mw
+          tw = mw & ~1
+          th = (vh.to_f * mw / vw).to_i & ~1
+        end
+      else
+        if vh > mh
+          th = mh & ~1
+          tw = (vw.to_f * mh / vh).to_i & ~1
+        end
+      end
+      tw = 2 if tw < 2
+      th = 2 if th < 2
+      return nil if tw >= vw && th >= vh
+      {tw, th}
+    end
+
+    # Smoke-tests a GPU chain against REAL ddagrab frames (10 frames at
+    # 10fps, ~1-2s). Synthetic hwupload textures have different provenance
+    # and prove nothing: AMF interop accepts Desktop-Duplication textures
+    # while rejecting hwupload-created ones (measured both ways). ddagrab
+    # works wherever capture itself can run; where it can't (headless),
+    # the probe fails fast and the CPU path is used.
+    private def gpu_probe_run(enc : String, chain : String) : Tuple(Bool, String)
+      err_io = IO::Memory.new
+      begin
+        status = Process.run(@ffmpeg_path,
+          ["-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "ddagrab=video_size=640x360:framerate=10:draw_mouse=0",
+           "-vf", chain,
+           "-c:v", enc, "-frames:v", "10", "-f", "null", "-"],
+          output: Process::Redirect::Close, error: err_io)
+        if status.success?
+          return {true, ""}
+        end
+        detail = err_io.to_s.lines.map(&.strip).reject(&.empty?).first(2).join(" | ")[0, 300]
+        {false, detail}
+      rescue ex
+        {false, ex.message.to_s[0, 200]}
+      end
+    end
+
+    # Winning GPU family per encoder ("cpu" = fall back), cached with a 60s
+    # retry on failure so one cold-start hiccup doesn't pin the session.
+    private def gpu_family(enc : String) : String
+      if fam = @gpu_family[enc]?
+        return fam if fam != "cpu"
+        if t = @gpu_probed_at[enc]?
+          return "cpu" if (Time.utc - t) < 60.seconds
+        end
+      end
+      fam = "cpu"
+      detail = ""
+      candidates = if nvenc_encoder?(enc)
+                     [{"d3d11", "scale_d3d11=width=320:height=180"}]
+                   elsif amf_encoder?(enc)
+                     [{"d3d11", "scale_d3d11=width=320:height=180:format=nv12"},
+                      {"vpp_amf", "vpp_amf=w=320:h=180:format=nv12"}]
+                   elsif qsv_encoder?(enc)
+                     [{"qsv", "hwmap=derive_device=qsv,scale_qsv=w=320:h=180"}]
+                   else
+                     [] of Tuple(String, String)
+                   end
+      candidates.each do |c|
+        ok, err = gpu_probe_run(enc, c[1])
+        if ok
+          fam = c[0]
+          break
+        else
+          detail = err
+        end
+      end
+      @gpu_family[enc] = fam
+      @gpu_probed_at[enc] = Time.utc
+      if fam == "cpu"
+        Log.warn { "capture: gpu zero-copy unavailable, CPU readback (#{enc}): #{detail}" }
+      else
+        Log.info { "capture: gpu zero-copy ACTIVE (#{enc} via #{fam})" }
+      end
+      fam
+    end
+
+    # Builds the -vf chain, GPU-first. Returns {filter_or_nil, gpu_path?}.
+    # GPU chains are probe-gated: anything untested on this box (a filter
+    # typo, a missing driver, a headless session) falls back to the legacy
+    # CPU readback path with a warning instead of an empty buffer.
+    private def video_filter(enc : String, vw : Int32, vh : Int32) : Tuple(String?, Bool)
+      target = downscale_target(vw, vh)
+      # NVENC eats ddagrab d3d11 directly: native needs no filter at all.
+      if nvenc_encoder?(enc) && target.nil?
+        return {nil, true}
+      end
+      unless enc == "libx264" || enc == "libx265"
+        case gpu_family(enc)
+        when "d3d11"
+          if nvenc_encoder?(enc)
+            if t = target
+              return {"scale_d3d11=width=#{t[0]}:height=#{t[1]}", true}
+            end
+          else
+            if t = target
+              return {"scale_d3d11=width=#{t[0]}:height=#{t[1]}:format=nv12", true}
+            end
+            return {"scale_d3d11=format=nv12", true}
+          end
+        when "vpp_amf"
+          if t = target
+            return {"vpp_amf=w=#{t[0]}:h=#{t[1]}:format=nv12", true}
+          end
+          return {"vpp_amf=format=nv12", true}
+        when "qsv"
+          if t = target
+            return {"hwmap=derive_device=qsv,scale_qsv=w=#{t[0]}:h=#{t[1]}", true}
+          end
+          return {"hwmap=derive_device=qsv", true}
+        end
+        Log.warn { "capture: gpu chain rejected for #{enc}, falling back to CPU readback" }
+      end
+
+      # Legacy CPU path: full-res GPU->CPU copy, then software convert.
+      # Always works, costs ~1.2GB/s readback at 3440x1440@60.
+      parts = Array(String).new
+      parts << "hwdownload" << "format=bgra" unless nvenc_encoder?(enc)
+      if t = target
+        parts << "scale=w=#{t[0]}:h=#{t[1]}:flags=bilinear"
         # NVENC takes d3d11 frames zero-copy; once we download+scale the
         # frames are software, so normalize the pixel format in-filter
         # instead of via -pix_fmt (which would be a second conversion).
         parts << "format=yuv420p" if nvenc_encoder?(enc)
       end
 
-      return nil if parts.empty?
-      parts.join(",")
+      return {nil, false} if parts.empty?
+      {parts.join(","), false}
     end
 
     private def capture_args : Array(String)
@@ -208,25 +343,33 @@ module Kirk
       # print at info level and would flood the rolling log, so stay one
       # level below that.
       args << "-hide_banner" << "-loglevel" << "warning" << "-stats" << "-y"
+      # Parallelize the software convert+scale behind the capture thread.
+      # Measured ~55 -> ~58fps headroom at 3440x1440 on RX 5600 XT.
+      args << "-filter_threads" << "4"
 
       vw = Win32.get_system_metrics(78)
       vh = Win32.get_system_metrics(79)
       vw = Win32.get_system_metrics(0) if vw <= 0
       vh = Win32.get_system_metrics(1) if vh <= 0
+      # Buffered video input: without this a busy game thread starves the
+      # ddagrab reader and the vsync stage drops frames to catch up.
+      args << "-thread_queue_size" << "512"
       args << "-f" << "lavfi"
       args << "-i" << "ddagrab=video_size=#{vw}x#{vh}:framerate=#{fps}:draw_mouse=1"
 
-      if @capture_audio
-        device = @mic_device
-        if device && !device.empty?
-          # Buffered dshow input: without these a busy game thread starves
-          # the mic reader and ffmpeg aborts with "real-time buffer full".
-          args << "-thread_queue_size" << "512" << "-f" << "dshow" << "-rtbufsize" << "256M" << "-i" << "audio=#{device}"
-        end
-      end
+      # NOTE: audio is captured by a SEPARATE ffmpeg process (audio_args).
+      # A combined A/V command drops ~5-8 video frames/s on this box even
+      # though the encoder idles (q=4): the dshow audio clock drags the
+      # vsync stage ("Past duration too large", frames arriving "late").
+      # Proven by A/B: video-only = 0 drops/20s, same command + mapped
+      # audio = ~100 drops/20s, across aresample/async/wallclock/dual-muxer
+      # variants. Splitting removes the coupling by construction.
 
       enc = encoder_name
-      if vf = video_filter(enc)
+      vf_gpu = video_filter(enc, vw, vh)
+      vf = vf_gpu[0]
+      gpu = vf_gpu[1]
+      if vf
         args << "-vf" << vf
       end
 
@@ -234,16 +377,16 @@ module Kirk
       preset_args(enc).each { |a| args << a }
       args << "-b:v" << "#{@bitrate_kbps}k"
       args << "-g" << (fps * seg).to_s # one segment per GOP, so every boundary is a keyframe
-      # NVENC consumes the ddagrab d3d11 frames directly; forcing a software
-      # pix_fmt would insert an impossible d3d11->yuv420p conversion.
-      # (When scaling with NVENC the filter chain already ends in
-      # format=yuv420p, so no -pix_fmt is needed there either.)
-      if !nvenc_encoder?(enc)
+      # -g alone is only a hint: AMF ultralowlatency ignores it (infinite
+      # GOP, single seg_00000.ts that never rolls). Force an IDR every
+      # segment so the segment muxer always has a split point, whatever the
+      # encoder's GOP handling is.
+      args << "-force_key_frames" << "expr:gte(t,n_forced*#{seg})"
+      # GPU paths keep hardware frames (d3d11/qsv); forcing a software
+      # pix_fmt would insert an impossible conversion or a silent
+      # download. The CPU fallback path normalizes to yuv420p instead.
+      if !gpu && !nvenc_encoder?(enc)
         args << "-pix_fmt" << "yuv420p"
-      end
-
-      if @capture_audio && @mic_device && !@mic_device.empty?
-        args << "-c:a" << "aac" << "-b:a" << "#{@audio_bitrate_kbps}k" << "-ar" << "44100" << "-ac" << "2"
       end
 
       args << "-f" << "segment"
@@ -254,12 +397,37 @@ module Kirk
       args
     end
 
+    # Audio-only rolling capture. Runs as its own process so the dshow
+    # device clock can never stall the video vsync stage (see above).
+    # Cuts on the same segment cadence so clip saves can tail-align the
+    # two segment lists.
+    private def audio_args : Array(String)?
+      return nil unless @capture_audio
+      device = @mic_device
+      return nil unless device && !device.empty?
+      seg = @segment_seconds.not_nil!
+
+      args = Array(String).new
+      args << "-hide_banner" << "-loglevel" << "warning" << "-stats" << "-y"
+      # Buffered dshow input: without these a busy game thread starves
+      # the mic reader and ffmpeg aborts with "real-time buffer full".
+      args << "-thread_queue_size" << "1024" << "-f" << "dshow" << "-rtbufsize" << "256M" << "-i" << "audio=#{device}"
+      args << "-c:a" << "aac" << "-b:a" << "#{@audio_bitrate_kbps}k" << "-ar" << "44100" << "-ac" << "2"
+      args << "-f" << "segment"
+      args << "-segment_time" << seg.to_s
+      args << "-reset_timestamps" << "1"
+      args << "-segment_format" << "mpegts"
+      args << @audio_pat
+      args
+    end
+
     # Starts the rolling capture, clearing stale segments.
     def start_capture : Bool
       stop_capture
 
       FileUtils.mkdir_p(@buffer_dir)
       Dir.glob(File.join(@buffer_dir, "seg_*.ts").gsub('\\', '/')).each { |f| File.delete(f) rescue nil }
+      Dir.glob(File.join(@buffer_dir, "aud_*.ts").gsub('\\', '/')).each { |f| File.delete(f) rescue nil }
 
       cmd = capture_args
       Log.info { "spawn: #{@ffmpeg_path} #{cmd.join(" ")}" }
@@ -274,6 +442,17 @@ module Kirk
         input: Process::Redirect::Pipe,
         output: Process::Redirect::Close,
         error: err_io)
+
+      if acmd = audio_args
+        Log.info { "spawn audio: #{@ffmpeg_path} #{acmd.join(" ")}" }
+        aud_log = File.join(@buffer_dir, "..", "logs", "ffmpeg.aud.log")
+        aud_io = File.new(aud_log, "w")
+        @audio_err_io = aud_io
+        @audio_proc = Process.new(@ffmpeg_path, acmd,
+          input: Process::Redirect::Pipe,
+          output: Process::Redirect::Close,
+          error: aud_io)
+      end
       true
     rescue ex
       Log.error(exception: ex) { "capture start failed" }
@@ -282,31 +461,59 @@ module Kirk
       rescue
       end
       @err_io = nil
+      begin
+        @audio_err_io.try(&.close)
+      rescue
+      end
+      @audio_err_io = nil
       false
     end
 
     def stop_capture
       p = @proc
-      return unless p
-      begin
-        p.input.try(&.puts("q"))
-      rescue
-        nil
+      if p
+        begin
+          p.input.try(&.puts("q"))
+        rescue
+          nil
+        end
+        50.times do
+          break if p.terminated?
+          sleep 100.milliseconds
+        end
+        unless p.terminated?
+          Win32.terminate_process(p.pid.to_u32)
+          p.wait
+        end
+        @proc = nil
       end
-      50.times do
-        break if p.terminated?
-        sleep 100.milliseconds
-      end
-      unless p.terminated?
-        Win32.terminate_process(p.pid.to_u32)
-        p.wait
-      end
-      @proc = nil
       begin
         @err_io.try(&.close)
       rescue
       end
       @err_io = nil
+      ap = @audio_proc
+      if ap
+        begin
+          ap.input.try(&.puts("q"))
+        rescue
+          nil
+        end
+        50.times do
+          break if ap.terminated?
+          sleep 100.milliseconds
+        end
+        unless ap.terminated?
+          Win32.terminate_process(ap.pid.to_u32)
+          ap.wait
+        end
+        @audio_proc = nil
+      end
+      begin
+        @audio_err_io.try(&.close)
+      rescue
+      end
+      @audio_err_io = nil
     end
 
     def capture_running? : Bool
@@ -314,25 +521,53 @@ module Kirk
       !p.nil? && !p.terminated?
     end
 
-    def remux_segments(segments : Array(String), out_path : String) : Bool
+    def audio_running? : Bool
+      ap = @audio_proc
+      !ap.nil? && !ap.terminated?
+    end
+
+    # Audio segments tail-aligned to the video selection, or [] when audio
+    # is unavailable/stale. Both processes cut every segment_seconds on
+    # their own wallclock, so counts can differ by one at the edges; the
+    # newest files cover the same window. A stale newest audio segment
+    # (dead audio process) is rejected so clips never dub ancient audio
+    # over fresh video.
+    def aligned_audio_segments(video_count : Int32) : Array(String)
+      return [] of String unless audio_running?
+      return [] of String if video_count <= 0
+      segs = Dir.glob(File.join(@buffer_dir, "aud_*.ts").gsub('\\', '/')).sort
+      return [] of String if segs.empty?
+      begin
+        newest = File.info(segs.last).modification_time
+        return [] of String if (Time.utc - newest) > (@segment_seconds * 2).seconds
+      rescue
+        return [] of String
+      end
+      n = Math.min(video_count, segs.size)
+      segs.last(n)
+    end
+
+    def remux_segments(segments : Array(String), out_path : String, audio_segments : Array(String) = [] of String) : Bool
       return false if segments.empty?
       FileUtils.mkdir_p(File.dirname(out_path))
 
-      concat_name = if segments.size == 1
-                      segments[0]
-                    else
-                      "concat:#{segments.join("|")}"
-                    end
-
       args = [
         "-hide_banner", "-loglevel", "error",
-        "-i", concat_name,
-        "-map", "0",
-        "-c", "copy",
-        "-movflags", "+faststart",
-        "-y", out_path,
-      ]
-      Log.info { "remux: spawning #{File.basename(@ffmpeg_path)} argcount=#{args.size}" }
+      ] of String
+      if audio_segments.empty?
+        concat_name = if segments.size == 1
+                        segments[0]
+                      else
+                        "concat:#{segments.join("|")}"
+                      end
+        args << "-i" << concat_name << "-map" << "0"
+      else
+        vname = segments.size == 1 ? segments[0] : "concat:#{segments.join("|")}"
+        aname = audio_segments.size == 1 ? audio_segments[0] : "concat:#{audio_segments.join("|")}"
+        args << "-i" << vname << "-i" << aname << "-map" << "0:v" << "-map" << "1:a"
+      end
+      args.concat(["-c", "copy", "-movflags", "+faststart", "-y", out_path])
+      Log.info { "remux: spawning #{File.basename(@ffmpeg_path)} argcount=#{args.size} (audio=#{audio_segments.size} segs)" }
 
       # Same detached-process rule as start_capture: never Inherit.
       log = File.open(File.join(@buffer_dir, "..", "logs", "ffmpeg.out.log"), "a") rescue nil

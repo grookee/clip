@@ -307,7 +307,9 @@ module Kirk
           name = clip_filename
           out_path = File.join(clips_path, name)
           Log.info { "clip: #{segments.size} segments -> #{out_path}" }
-          if e.remux_segments(segments, out_path)
+          audio = e.aligned_audio_segments(segments.size)
+          Log.info { "clip: + #{audio.size} audio segments" } unless audio.empty?
+          if e.remux_segments(segments, out_path, audio)
             Log.info { "clip: saved #{out_path}" }
             show_balloon("Clip saved", "kirk saved your last #{@cfg.replay_seconds}s to the clips folder.")
           else
