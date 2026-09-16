@@ -104,7 +104,11 @@ jobs:
         shell: pwsh
         run: |
           $params = @{}
-          if ('${{ github.ref_type }}' -eq 'tag') { $params['Version'] = '${{ github.ref_name }}'.TrimStart('v') + '.0' }
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tag = '${{ github.ref_name }}'.TrimStart('v')
+            if ($tag -match '^(\d+\.\d+\.\d+)') { $params['Version'] = "$($Matches[1]).0" }
+            else { throw "tag must begin with x.y.z (got $tag)" }
+          }
           ./scripts/build_msix.ps1 @params
 
       - name: Upload unsigned MSIX
@@ -127,7 +131,9 @@ jobs:
           MSIX_PFX_PASSWORD: ${{ secrets.MSIX_PFX_PASSWORD }}
           MSIX_PUBLISHER: ${{ secrets.MSIX_PUBLISHER }}
         run: |
-          $params = @{ Version = '${{ github.ref_name }}'.TrimStart('v') + '.0' }
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($tag -notmatch '^(\d+\.\d+\.\d+)') { throw "tag must begin with x.y.z (got $tag)" }
+          $params = @{ Version = "$($Matches[1]).0" }
           if ($env:MSIX_PFX_BASE64) {
             $pfx = Join-Path $env:RUNNER_TEMP 'kirk-signing.pfx'
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:MSIX_PFX_BASE64))
