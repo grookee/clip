@@ -39,6 +39,8 @@ lib LibShim
   fun kirk_voice_poll(handle : Void*, phrase_utf8 : UInt8**, confidence : LibC::Float*) : LibC::Int
   fun kirk_voice_counters(sound : UInt64*, hyp : UInt64*, reco : UInt64*, reject : UInt64*) : Void
   fun kirk_voice_status(handle : Void*, stream_pos : UInt64*, recog_state : UInt32*) : LibC::Int
+  fun kirk_voice_enum_recognizers(list : AudioDeviceList*) : LibC::Int
+  fun kirk_voice_enum_audio_inputs(list : AudioDeviceList*) : LibC::Int
 
   fun kirk_wstr_to_utf8(wstr : WChar*) : UInt8*
 end
@@ -110,11 +112,19 @@ class VoiceSession
   end
 
   protected def native_handle! : Void*
-    @handle.not_nil!
+    h = @handle
+    raise "VoiceSession: null native handle" if h.nil? || h.null?
+    h
   end
 
+  # NOTE: LibShim returns a raw NULL pointer on failure, which is *not* Nil.
+  # `!@handle.nil?` alone treats NULL as valid, so a failed
+  # kirk_voice_create slipped through as "bound to '(none)'" and died later
+  # in load_grammar with a stale hr=0x0. Check both.
   def valid? : Bool
-    !@handle.nil?
+    h = @handle
+    return false if h.nil?
+    !h.null?
   end
 
   def load_grammar(path : String) : Bool
@@ -169,6 +179,38 @@ def win32_voice_counters : {UInt64, UInt64, UInt64, UInt64}
   {s, h, r, j}
 end
 
+# Lists installed SAPI recognizers (e.g. "MS-1033-80-DESK") as id/name pairs.
+# Returns {ok, entries}: ok=false means the SAPI enumeration itself failed
+# (COM/category error); ok=true with empty entries means none installed.
+def win32_list_speech_recognizers : {Bool, Array(MicDevice)}
+  win32_list_sapi_tokens(->LibShim.kirk_voice_enum_recognizers(LibShim::AudioDeviceList*))
+end
+
+# Lists SAPI audio inputs (separate from WASAPI capture endpoints).
+def win32_list_sapi_audio_inputs : {Bool, Array(MicDevice)}
+  win32_list_sapi_tokens(->LibShim.kirk_voice_enum_audio_inputs(LibShim::AudioDeviceList*))
+end
+
+private def win32_list_sapi_tokens(fn : LibShim::AudioDeviceList* -> LibC::Int) : {Bool, Array(MicDevice)}
+  cok = Win32.ole_initialize(0x0)
+  begin
+    list = LibShim::AudioDeviceList.new
+    return {false, [] of MicDevice} if fn.call(pointerof(list)) != 0
+    entries = [] of MicDevice
+    n = list.count
+    i = 0
+    while i < n
+      dev = list.devices + i
+      entries << MicDevice.new(Win32.wstr_to_string(dev.value.id), Win32.wstr_to_string(dev.value.name))
+      i += 1
+    end
+    LibShim.kirk_audio_enum_free(pointerof(list))
+    {true, entries}
+  ensure
+    Win32.ole_uninitialize if cok >= 0
+  end
+end
+
 def win32_voice_last_hresult : Int32
   LibShim.kirk_voice_last_hresult.to_i32
 end
@@ -215,8 +257,11 @@ def win32_voice_create(device_hint : String? = nil) : VoiceSession
 end
 
 def win32_voice_destroy(session : VoiceSession)
-  h = session.valid? ? session.handle.not_nil! : nil
-  return unless h
-  LibShim.kirk_voice_destroy(h)
+  # Always balance the CoInitialize in win32_voice_create, even when creation
+  # returned NULL (invalid session): otherwise a failed create leaks one COM
+  # init count per retry.
+  if session.valid?
+    LibShim.kirk_voice_destroy(session.handle.not_nil!)
+  end
   Win32.ole_uninitialize
 end

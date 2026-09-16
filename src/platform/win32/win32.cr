@@ -305,6 +305,23 @@ module Win32
     Shell32.ShellExecuteW(nil, to_wstr("open"), to_wstr(path), nil, nil, 1)
   end
 
+  # Opens a Windows Settings page (e.g. "ms-settings:speech"). Best-effort:
+  # returns the ShellExecute result code, callers log and move on.
+  def self.open_settings_page(page : String)
+    Shell32.ShellExecuteW(nil, to_wstr("open"), to_wstr(page), nil, nil, 1)
+  end
+
+  MB_YESNO       = 0x04_u32
+  MB_ICONWARNING = 0x30_u32
+  IDYES          =        6
+
+  # Blocking Yes/No prompt. Safe to call from the main/UI thread; do not call
+  # from inside a WndProc re-entrancy-sensitive path more than once per event
+  # (callers gate with a shown-once flag).
+  def self.confirm_dialog(owner : HWND, caption : String, text : String) : Bool
+    User32.MessageBoxW(owner, to_wstr(text), to_wstr(caption), MB_YESNO | MB_ICONWARNING) == IDYES
+  end
+
   def self.timestamp : String
     t = SYSTEMTIME.new
     Kernel32.GetLocalTime(pointerof(t).as(Void*))

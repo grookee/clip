@@ -42,6 +42,7 @@ module Kirk
     @settings_open = false
     @voice_polls = 0_i64
     @house_ticks = 0_i64
+    @voice_install_prompt_shown = false
 
     def self.new(cfg : Settings, settings_path : String) : self
       allocate.tap { |a| a.initialize(cfg, settings_path) }
@@ -152,6 +153,11 @@ module Kirk
         @voice.not_nil!.start(@dirs[:logs], phrases, @cfg.mic_device)
       end
       update_voice_tray_status
+      if (@voice.try(&.listening?) || false)
+        log_voice_diagnostics
+      else
+        maybe_prompt_for_speech_install
+      end
 
       @engine = FFmpegEngine.new(@dirs[:buffer])
       @engine.not_nil!.apply_settings(@cfg)
@@ -396,6 +402,53 @@ module Kirk
       Log.info { "voice: status -> #{tip}" }
     end
 
+    # One-line inventory of what SAPI offers, for support logs. No prompt.
+    private def log_voice_diagnostics
+      ok_r, recos = win32_list_speech_recognizers
+      ok_a, inputs = win32_list_sapi_audio_inputs
+      Log.info { "voice: recognizers ok=#{ok_r} count=#{recos.size}#{recos.empty? ? "" : " (" + recos.map(&.name).join("; ") + ")"}" }
+      Log.info { "voice: sapi inputs ok=#{ok_a} count=#{inputs.size}#{inputs.empty? ? "" : " (" + inputs.map(&.name).join("; ") + ")"}" }
+    end
+
+    # On voice start failure, checks whether a speech prerequisite is missing
+    # and — once per process — shows a balloon plus a Yes/No popup that opens
+    # the right Settings page. Returns true when such a specific prompt was
+    # shown, so callers skip their generic "see kirk.log" balloon.
+    private def maybe_prompt_for_speech_install : Bool
+      return false unless @cfg.voice_enabled
+      return false if @voice_install_prompt_shown
+      v = @voice
+      # Only prompt when voice actually failed (disabled/empty-phrases paths
+      # never reach here, but double-check via listening? when available).
+      if v && v.listening?
+        return false
+      end
+      ok_r, recos = win32_list_speech_recognizers
+      ok_a, inputs = win32_list_sapi_audio_inputs
+      Log.info { "voice: recognizers ok=#{ok_r} count=#{recos.size}#{recos.empty? ? "" : " (" + recos.map(&.name).join("; ") + ")"}" }
+      Log.info { "voice: sapi inputs ok=#{ok_a} count=#{inputs.size}#{inputs.empty? ? "" : " (" + inputs.map(&.name).join("; ") + ")"}" }
+      owner = @hwnd || Pointer(Void).null
+      if ok_r && recos.empty?
+        @voice_install_prompt_shown = true
+        Log.warn { "voice: no SAPI speech recognizers installed - prompting to install" }
+        show_balloon("Voice needs speech recognition", "No speech recognizer installed - voice is off, hotkeys still work.")
+        if Win32.confirm_dialog(owner, "kirk - voice needs speech recognition", "No Windows speech recognizer is installed, so voice commands can't listen.\n\nHotkeys (F8/F9/F10) still work.\n\nOpen Windows speech settings to install one?\n(Time & language > Speech > add English, then restart kirk)")
+          Win32.open_settings_page("ms-settings:speech")
+        end
+        return true
+      end
+      if ok_a && inputs.empty?
+        @voice_install_prompt_shown = true
+        Log.warn { "voice: no SAPI audio inputs found - prompting to check microphone" }
+        show_balloon("Voice needs a microphone", "No speech microphone found - voice is off, hotkeys still work.")
+        if Win32.confirm_dialog(owner, "kirk - no speech microphone", "Speech recognition is installed, but no speech microphone (SAPI audio input) was found.\n\nCheck the mic is enabled and Settings > Privacy > Microphone allows desktop apps.\n\nOpen microphone privacy settings?")
+          Win32.open_settings_page("ms-settings:privacy-microphone")
+        end
+        return true
+      end
+      false
+    end
+
     private def poll_housekeeping
       @buffer.try(&.prune)
       @storage.try(&.prune)
@@ -572,7 +625,8 @@ module Kirk
       else
         voice.start(@dirs[:logs], phrases, @cfg.mic_device)
         unless voice.listening?
-          show_balloon("Voice inactive", "Voice engine failed to start - see kirk.log for why.")
+          handled = maybe_prompt_for_speech_install
+          show_balloon("Voice inactive", "Voice engine failed to start - see kirk.log for why.") unless handled
         end
       end
       @voice = voice

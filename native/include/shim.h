@@ -75,6 +75,13 @@ KIRK_SHIM_API void kirk_voice_counters(unsigned long long *sound, unsigned long 
 /// Liveness probe: stream position advances with incoming audio. Returns 0 on success.
 KIRK_SHIM_API int kirk_voice_status(kirk_voice_handle h, unsigned long long *stream_pos, unsigned *recog_state);
 
+/// Enumerates installed SAPI recognizers (SPCAT_RECOGNIZERS) and SAPI audio
+/// inputs (SPCAT_AUDIOIN). Same layout as WASAPI capture lists: free with
+/// kirk_audio_enum_free. Returns 0 on success (count 0 = none installed),
+/// -1 on COM/category failure.
+KIRK_SHIM_API int kirk_voice_enum_recognizers(kirk_audio_device_list *out);
+KIRK_SHIM_API int kirk_voice_enum_audio_inputs(kirk_audio_device_list *out);
+
 #define KIRK_STR_LEN 260
 #define KIRK_PATH_LEN 520
 

@@ -113,13 +113,19 @@ module Kirk
 
       session = win32_voice_create(device_hint)
       unless session.valid?
-        Log.error { "voice: could not create SAPI session (listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)})" }
+        Log.error { "voice: could not create SAPI session (listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)}). Check: Windows Speech Recognition / en-US speech pack installed, Settings > Privacy > Microphone allowed, and a SAPI input exists (see README voice troubleshooting)." }
+        win32_voice_destroy(session)
         @session = nil
         return
       end
       Log.info { "voice: audio input bound to '#{session.input_name}'" }
       unless session.load_grammar(path)
-        Log.error { "voice: grammar load FAILED for #{path} (listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)})" }
+        detail = begin
+          "exists=#{File.exists?(path)} size=#{File.exists?(path) ? File.size(path) : -1}"
+        rescue
+          "exists=? size=?"
+        end
+        Log.error { "voice: grammar load FAILED for #{path} (#{detail}, listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)})" }
         win32_voice_destroy(session)
         @session = nil
         return
