@@ -34,6 +34,8 @@ module Kirk::UIBridge
     c.show_save_notifications = s.show_save_notifications ? 1 : 0
     c.play_save_sound = s.play_save_sound ? 1 : 0
     c.voice_enabled = s.voice_enabled ? 1 : 0
+    c.voice_confidence_pct = (s.voice_confidence.clamp(0.0, 1.0) * 100).round.to_i32.clamp(1, 100)
+    c.voice_cooldown_ms = s.voice_cooldown_ms.clamp(250, 15000)
     c.auto_start_recording = s.auto_start_recording ? 1 : 0
     c.hotkey_clip_mod = s.hotkey_clip_mod
     c.hotkey_clip_vk = s.hotkey_clip_vk
@@ -79,6 +81,10 @@ module Kirk::UIBridge
     t.show_save_notifications = cc.show_save_notifications != 0
     t.play_save_sound = cc.play_save_sound != 0
     t.voice_enabled = cc.voice_enabled != 0
+    pct = cc.voice_confidence_pct
+    t.voice_confidence = (pct >= 1 && pct <= 100) ? pct.to_f64 / 100.0 : 0.01
+    cd = cc.voice_cooldown_ms
+    t.voice_cooldown_ms = (cd >= 250 && cd <= 15000) ? cd : 2500
     t.auto_start_recording = cc.auto_start_recording != 0
     t.hw_encoder = read_wchars(cc.encoder)
     preset = read_wchars(cc.encoder_preset).strip
@@ -101,7 +107,8 @@ module Kirk::UIBridge
     end
     t.capture_system_audio = cc.capture_system_audio != 0
     t.system_audio_device = read_wchars(cc.system_audio_device)
-    t.system_audio_device = "" if t.system_audio_device.strip == "(Default output)"
+    sys = t.system_audio_device.strip
+    t.system_audio_device = "" if sys == "(Default output)" || sys == "(None)"
     mg = cc.mic_gain_pct
     t.mic_gain = (mg >= 0 && mg <= 200) ? mg.to_f64 / 100.0 : 1.0
     sg = cc.system_gain_pct

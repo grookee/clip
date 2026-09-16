@@ -1,4 +1,4 @@
-# kirk CI/CD — Windows build on every push/PR, published release on version tags.
+# kirk CI/CD - Windows build on every push/PR, published release on version tags.
 #
 # Flow:
 #   push to main / pull request -> build job compiles shim.dll + kirk.exe.

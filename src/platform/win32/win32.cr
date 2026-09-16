@@ -1,4 +1,4 @@
-# Plain C-callable Win32 API — no COM vtable calls. COM-heavy subsystems
+# Plain C-callable Win32 API - no COM vtable calls. COM-heavy subsystems
 # (WASAPI enumerate, SAPI voice) live in the shim DLL.
 
 module Win32
@@ -358,7 +358,15 @@ module Win32
 
   IDI_APPLICATION = 32512_u32
 
+  # Kirk's own icon resource id (see native icon wiring in scripts/build.ps1).
+  KIRK_ICON_ID = 1_u64
+
+  # The exe's own icon so the tray shows the same mark as the title bar and
+  # taskbar. Falls back to the system icon when the binary carries no icon
+  # resource.
   def self.app_icon : Void*
+    icon = User32.LoadIconW(get_module_handle, Pointer(WCHAR).new(KIRK_ICON_ID))
+    return icon unless icon.null?
     User32.LoadIconW(nil, Pointer(WCHAR).new(IDI_APPLICATION.to_u64))
   end
 
@@ -387,8 +395,8 @@ module Win32
     fun PlaySoundW(sound : WCHAR*, mod : HANDLE, flags : DWORD) : BOOL
   end
 
-  SND_ASYNC     = 0x0001_u32
-  SND_NODEFAULT = 0x0002_u32
+  SND_ASYNC     =     0x0001_u32
+  SND_NODEFAULT =     0x0002_u32
   SND_FILENAME  = 0x00020000_u32
 
   # Fire-and-forget chime for clip saves. Best-effort: a missing file just

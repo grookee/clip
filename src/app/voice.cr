@@ -5,7 +5,16 @@ require "set"
 module Kirk
   # Coordinates voice commands. SAPI (via the shim) recognizes phrases from a
   # generated SRGS grammar; recognized phrases map to actions by substring
-  # match. Pipeline per event: confidence check -> cooldown check -> action.
+  # match. Pipeline per event: confidence floor -> strict phrase match ->
+  # chatter-burst gate -> cooldown -> action.
+  #
+  # Why the burst gate: the grammar constrains SAPI so ANY speech (e.g.
+  # chatting on Discord) is force-mapped onto the closest command phrase at
+  # low confidence. The confidence floor alone cannot separate deliberate
+  # commands from conversation, because both decode in the same low range.
+  # Continuous conversation surfaces dense bursts of candidates, while a
+  # deliberate command is isolated, so contenders arriving inside
+  # isolation_ms of a previous contender need high confidence to fire.
   class Voice
     enum Action
       Clip
@@ -14,18 +23,33 @@ module Kirk
       None
     end
 
+    # Outcome of the post-processing pipeline, for logging/tuning.
+    enum Decision
+      Fire
+      BelowFloor
+      NoPhraseMatch
+      BurstSuppressed
+      CoolingDown
+    end
+
     getter session : VoiceSession?
     getter enabled : Bool
 
     @grammar_path : String
     @last_fire : Time::Instant? = nil
+    @last_contender_at : Time::Instant? = nil
     @cooldown_ms : Int32
     @confidence_min : Float64
+    @isolation_ms : Int32
+    @high_confidence : Float64
+    @phrases_normalized : Set(String) = Set(String).new
 
     def initialize(persist_dir : String, enabled : Bool)
       @enabled = enabled
       @cooldown_ms = 2500
       @confidence_min = 0.01
+      @isolation_ms = 1200
+      @high_confidence = 0.5
       @grammar_path = File.join(persist_dir, "voice.srgs")
       @session = nil
     end
@@ -33,6 +57,8 @@ module Kirk
     def apply_settings(cfg : Kirk::Settings)
       @cooldown_ms = cfg.voice_cooldown_ms
       @confidence_min = cfg.voice_confidence
+      @isolation_ms = cfg.voice_isolation_ms
+      @high_confidence = cfg.voice_high_confidence
       @enabled = cfg.voice_enabled
     end
 
@@ -59,6 +85,12 @@ module Kirk
     def self.grammar_text(phrase : String) : String
       cleaned = phrase.gsub(/[,!?.;:]/, " ").gsub(/\s+/, " ").strip
       cleaned.empty? ? phrase.strip : cleaned
+    end
+
+    # Canonical form for comparing a recognition against the configured
+    # phrases: case-insensitive, punctuation/whitespace-insensitive.
+    def self.normalize(phrase : String) : String
+      grammar_text(phrase).downcase
     end
 
     def listening? : Bool
@@ -108,7 +140,11 @@ module Kirk
       FileUtils.mkdir_p(persist_dir)
       @grammar_path = File.join(persist_dir, "voice.srgs")
       path = build_grammar(phrases)
-      Log.info { "voice: starting (#{phrases.size} phrases, conf_min=#{@confidence_min}, cooldown=#{@cooldown_ms}ms, grammar=#{path}, mic_hint=#{device_hint.inspect})" }
+      @phrases_normalized = Set(String).new(phrases.map { |p| Voice.normalize(p) }.reject(&.empty?))
+      if @confidence_min > 0.2
+        Log.warn { "voice: confidence floor #{@confidence_min} is very strict on the SAPI scale (clear commands decode around 0.02-0.05); commands may never fire - lower it in Settings > Voice commands" }
+      end
+      Log.info { "voice: starting (#{phrases.size} phrases, conf_min=#{@confidence_min}, high=#{@high_confidence}, cooldown=#{@cooldown_ms}ms, isolation=#{@isolation_ms}ms, grammar=#{path}, mic_hint=#{device_hint.inspect})" }
       phrases.each { |p| Log.debug { "voice: phrase '#{p}' -> grammar '#{Voice.grammar_text(p)}'" } }
 
       session = win32_voice_create(device_hint)
@@ -150,8 +186,43 @@ module Kirk
       @session = nil
     end
 
-    # Low-confidence hypotheses log at INFO so a too-strict threshold is
-    # visible in the default local log instead of failing silently.
+    # Pure gate decision (no clock reads inside): `now` is injected so the
+    # burst/cooldown logic is unit-testable without a SAPI session.
+    # @last_contender_at tracks the previous contender (floor-passing,
+    # phrase-matching candidate), updated by poll() - not here.
+    def decide(phrase : String, confidence : Float64, now : Time::Instant) : Decision
+      Voice.gate(
+        phrase, confidence, @phrases_normalized,
+        @confidence_min, @high_confidence, @isolation_ms, @cooldown_ms,
+        @last_contender_at, @last_fire, now)
+    end
+
+    # Stateless core of decide(): all inputs explicit, so tests can drive
+    # burst/cooldown scenarios with synthetic timestamps.
+    def self.gate(phrase : String, confidence : Float64, phrases : Set(String),
+                  floor : Float64, high_confidence : Float64, isolation_ms : Int32,
+                  cooldown_ms : Int32,
+                  last_contender_at : Time::Instant?, last_fire : Time::Instant?,
+                  now : Time::Instant) : Decision
+      return Decision::BelowFloor if confidence < floor
+      return Decision::NoPhraseMatch unless phrases.includes?(Voice.normalize(phrase))
+      high = Math.max(high_confidence, floor)
+      if last = last_contender_at
+        if (now - last).total_milliseconds < isolation_ms && confidence < high
+          return Decision::BurstSuppressed
+        end
+      end
+      if last = last_fire
+        if (now - last).total_milliseconds < cooldown_ms
+          return Decision::CoolingDown
+        end
+      end
+      Decision::Fire
+    end
+
+    # Every surfaced recognition is logged at INFO with its confidence and
+    # the gate outcome, so a too-strict (or too-loose) threshold is tunable
+    # from the default local log instead of failing silently.
     def poll : Action
       return Action::None unless @enabled
       session = @session
@@ -161,21 +232,27 @@ module Kirk
       return Action::None unless result
 
       phrase, confidence = result
-      if confidence < @confidence_min
-        Log.info { "voice: heard '#{phrase}' conf=#{confidence.round(3)} below threshold #{@confidence_min} (no action)" }
+      now = Time.instant
+      case decide(phrase, confidence, now)
+      when Decision::BelowFloor
+        Log.info { "voice: heard '#{phrase}' conf=#{confidence.round(3)} below floor #{@confidence_min} (no action)" }
+        return Action::None
+      when Decision::NoPhraseMatch
+        Log.info { "voice: heard '#{phrase}' conf=#{confidence.round(3)} matches no configured phrase (no action)" }
+        return Action::None
+      when Decision::BurstSuppressed
+        @last_contender_at = now
+        Log.info { "voice: heard '#{phrase}' conf=#{confidence.round(3)} suppressed: chatter burst (pause ~#{@isolation_ms}ms before commands, or raise confidence above #{@high_confidence})" }
+        return Action::None
+      when Decision::CoolingDown
+        @last_contender_at = now
+        Log.debug { "voice: ignored (cooldown)" }
         return Action::None
       end
-      Log.debug { "voice: '#{phrase}' conf=#{confidence.round(3)}" }
 
-      now = Time.instant
-      if last = @last_fire
-        if (now - last).total_milliseconds < @cooldown_ms
-          Log.debug { "voice: ignored (cooldown)" }
-          return Action::None
-        end
-      end
-
+      @last_contender_at = now
       @last_fire = now
+      Log.info { "voice: accepted '#{phrase}' conf=#{confidence.round(3)}" }
       match_action(phrase)
     end
 

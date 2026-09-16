@@ -3,7 +3,7 @@
 #define INITGUID
 
 // NOTE (Google style exception): Windows SDK dependency order, not
-// alphabetical — <windows.h> first, then the rest; shim.h last because it
+// alphabetical - <windows.h> first, then the rest; shim.h last because it
 // needs HWND from <windows.h>.
 #include <windows.h>
 #include <objbase.h>
@@ -161,7 +161,7 @@ kirk_voice_handle kirk_voice_create(const wchar_t *device_id) {
 
   if (!chosen) {
     // No explicit token (no hint match and no usable default). Last resort:
-    // let SAPI pick its default audio input — the same thing .NET's
+    // let SAPI pick its default audio input - the same thing .NET's
     // SetInputToDefaultAudioDevice() and the SAPI tutorials do via
     // SetInput(NULL, TRUE). Covers machines where token enumeration yields
     // nothing usable but a default capture device exists (WASAPI shows a

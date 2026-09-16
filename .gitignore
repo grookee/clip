@@ -1,4 +1,4 @@
-# kirk — Keep It Recorded, Kirk
+# kirk - Keep It Recorded, Kirk
 # Crystal + native C/C++ shim (MSVC) + PowerShell build scripts.
 # Vendored FFmpeg runtime lives under vendor/ (see note below).
 

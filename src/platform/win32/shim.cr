@@ -120,6 +120,9 @@ struct KirkSettings
   property mic_gain_pct : Int32 = 100
   property system_gain_pct : Int32 = 100
   property play_save_sound : LibC::Int = 0
+  # Voice tuning (must match kirk_settings tail order in native/include/shim.h).
+  property voice_confidence_pct : Int32 = 1
+  property voice_cooldown_ms : Int32 = 2500
 end
 
 class VoiceSession

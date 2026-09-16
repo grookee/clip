@@ -142,7 +142,7 @@ module Kirk
 
     # Maps the generic `encoder_preset` setting onto per-encoder options.
     # NVENC understands p1..p7, AMF wants speed|balanced|quality, QSV and
-    # x264 have their own preset names — so a raw passthrough only ever
+    # x264 have their own preset names - so a raw passthrough only ever
     # worked for NVENC and silently fell back to ffmpeg defaults elsewhere.
     private def preset_args(enc : String) : Array(String)
       extra = Array(String).new
@@ -413,11 +413,17 @@ module Kirk
     # two segment lists.
     #
     # Mini mixer: primary mic + up to N extra dshow devices + optional
-    # WASAPI loopback (game / Discord / system output), mixed with amix
-    # into ONE aac stream so the remux path below is unchanged. An empty
-    # mic_device means the system default mic (wasapi `default`), NOT
-    # silence — the old code returned nil here, so "Recording mic:
-    # (System default)" + capture ON recorded no audio at all.
+    # loopback-capture device (Stereo Mix / VB-Cable output / Voicemeeter -
+    # game / Discord / system output), mixed with amix into ONE aac stream
+    # so the remux path below is unchanged.
+    #
+    # Everything is dshow: the vendored ffmpeg build has no wasapi demuxer
+    # (and some system builds lack its loopback option, dying with
+    # "Unrecognized option 'loopback'"), so wasapi inputs can never be
+    # relied on. An empty mic_device means the system default mic resolved
+    # to its dshow friendly name, NOT silence. An empty system device
+    # (or capture_system_audio off) means mics only - plain speakers are
+    # not capturable with this build.
     private def dshow_audio_input(name : String) : Array(String)
       # dshow parses audio=<name>; a stray double-quote in a friendly name
       # breaks the device match, so normalize it away. The whole token is
@@ -427,17 +433,41 @@ module Kirk
        "-i", "audio=#{safe}"]
     end
 
-    private def audio_args : Array(String)?
-      return nil unless @capture_audio
-      seg = @segment_seconds.not_nil!
+    # Probe for an ffmpeg demuxer (e.g. dshow). Guards against builds
+    # compiled without it, which would otherwise die at spawn with
+    # "Unknown input format".
+    private def demuxer_supported?(name : String) : Bool
+      begin
+        buf = IO::Memory.new
+        status = Process.run(@ffmpeg_path,
+          ["-hide_banner", "-h", "demuxer=#{name}"],
+          output: buf, error: buf)
+        return false unless status.success?
+        !buf.to_s.includes?("Unknown demuxer") && !buf.to_s.includes?("Unknown format")
+      rescue
+        false
+      end
+    end
 
-      # Collect inputs: {kind_args, gain}. Order is stable: mic, extras, loopback.
+    # Friendly name of the system default capture device (a dshow-usable
+    # name), or nil when none can be determined.
+    private def default_mic_name : String?
+      name = win32_default_capture_name
+      return nil if name.strip.empty?
+      # Placeholders from the shim when no device exists.
+      return nil if name.starts_with?("(")
+      name
+    rescue
+      nil
+    end
+
+    private def audio_inputs(include_system : Bool) : Array({Array(String), Float64})
       inputs = [] of {Array(String), Float64}
       mic = @mic_device
       if mic && !mic.strip.empty?
         inputs << {dshow_audio_input(mic.strip), @mic_gain}
-      else
-        inputs << {["-thread_queue_size", "1024", "-f", "wasapi", "-i", "default"], @mic_gain}
+      elsif default_name = default_mic_name
+        inputs << {dshow_audio_input(default_name), @mic_gain}
       end
       @extra_audio_devices.each do |d|
         name = d.strip
@@ -445,13 +475,19 @@ module Kirk
         next if mic && !mic.strip.empty? && name.downcase == mic.strip.downcase
         inputs << {dshow_audio_input(name), 1.0}
       end
-      if @capture_system_audio
+      if include_system && @capture_system_audio
         dev = @system_audio_device.strip
-        dev = "default" if dev.empty?
-        inputs << {["-thread_queue_size", "1024", "-f", "wasapi", "-loopback", "1", "-i", dev], @system_gain}
+        if dev.empty?
+          Log.warn { "audio: system audio ON but no source picked - recording mics only (pick a loopback capture device like Stereo Mix / VB-Cable output in Settings > Audio mixer)" }
+        else
+          inputs << {dshow_audio_input(dev), @system_gain}
+        end
       end
-      return nil if inputs.empty?
+      inputs
+    end
 
+    private def audio_cmd(inputs : Array({Array(String), Float64})) : Array(String)
+      seg = @segment_seconds.not_nil!
       args = Array(String).new
       args << "-hide_banner" << "-loglevel" << "warning" << "-stats" << "-y"
       inputs.each { |in_args, _| in_args.each { |a| args << a } }
@@ -480,6 +516,71 @@ module Kirk
       args
     end
 
+    private def audio_args(include_system : Bool = true) : Array(String)?
+      return nil unless @capture_audio
+      # dshow-only (see above): without it no audio input can work.
+      unless demuxer_supported?("dshow")
+        Log.error { "audio: ffmpeg has no dshow demuxer (#{@ffmpeg_path}) - audio disabled, video continues" }
+        return nil
+      end
+      inputs = audio_inputs(include_system)
+      if inputs.empty?
+        Log.error { "audio: no mic device and no default capture device - audio disabled, video continues" }
+        return nil
+      end
+      audio_cmd(inputs)
+    end
+
+    # Last lines of the audio ffmpeg log, for diagnosing a dead audio
+    # process without opening another file.
+    private def audio_log_tail(lines : Int32 = 8) : String
+      path = File.join(@buffer_dir, "..", "logs", "ffmpeg.aud.log")
+      return "(no log)" unless File.exists?(path)
+      all = File.read_lines(path).map(&.strip).reject(&.empty?)
+      all.last(lines).join(" | ")[0, 600]
+    rescue
+      "(unreadable log)"
+    end
+
+    # Spawns one audio ffmpeg process and watchdogs it: a bad device name
+    # (or missing demuxer option, e.g. the old `-loopback` crash) exits
+    # within milliseconds. Instead of leaving a dead process behind while
+    # clips silently go quiet, report the log tail and return false so the
+    # caller can fall back. The video process is never touched.
+    private def start_audio_proc(acmd : Array(String), tag : String) : Bool
+      Log.info { "spawn audio (#{tag}): #{@ffmpeg_path} #{acmd.join(" ")}" }
+      aud_log = File.join(@buffer_dir, "..", "logs", "ffmpeg.aud.log")
+      aud_io = File.new(aud_log, "w")
+      @audio_err_io = aud_io
+      proc = Process.new(@ffmpeg_path, acmd,
+        input: Process::Redirect::Pipe,
+        output: Process::Redirect::Close,
+        error: aud_io)
+      @audio_proc = proc
+      # Bad inputs fail fast; a healthy rolling capture runs indefinitely.
+      sleep 800.milliseconds
+      if proc.terminated?
+        begin
+          aud_io.close
+        rescue
+        end
+        @audio_err_io = nil
+        @audio_proc = nil
+        Log.error { "audio (#{tag}): ffmpeg exited at startup - #{audio_log_tail}" }
+        return false
+      end
+      true
+    rescue ex
+      Log.error(exception: ex) { "audio (#{tag}): spawn failed" }
+      begin
+        @audio_err_io.try(&.close)
+      rescue
+      end
+      @audio_err_io = nil
+      @audio_proc = nil
+      false
+    end
+
     # Starts the rolling capture, clearing stale segments.
     def start_capture : Bool
       stop_capture
@@ -502,15 +603,16 @@ module Kirk
         output: Process::Redirect::Close,
         error: err_io)
 
-      if acmd = audio_args
-        Log.info { "spawn audio: #{@ffmpeg_path} #{acmd.join(" ")}" }
-        aud_log = File.join(@buffer_dir, "..", "logs", "ffmpeg.aud.log")
-        aud_io = File.new(aud_log, "w")
-        @audio_err_io = aud_io
-        @audio_proc = Process.new(@ffmpeg_path, acmd,
-          input: Process::Redirect::Pipe,
-          output: Process::Redirect::Close,
-          error: aud_io)
+      if acmd = audio_args(include_system: true)
+        start_audio_proc(acmd, "full mix") || begin
+          # A bad system-loopback name kills the whole mixer (one process).
+          # Retry mics-only so a misconfigured loopback source degrades to
+          # mic audio instead of silence.
+          Log.warn { "audio: full mix failed, retrying mics-only" }
+          if mcmd = audio_args(include_system: false)
+            start_audio_proc(mcmd, "mics-only") || Log.error { "audio: mics-only mix failed too - clips will be video-only (see ffmpeg.aud.log)" }
+          end
+        end
       end
       true
     rescue ex

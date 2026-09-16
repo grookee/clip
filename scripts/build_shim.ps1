@@ -39,7 +39,24 @@ $srcFiles = @(
 )
 
 $defs  = "/D_WIN32 /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00"
-$incs  = "/I`"$Native\include`""
+$incs  = "/I`"$Native\include`" /I`"$fullOut`""
+
+# Build stamp for the settings dialog footer (version + short commit),
+# generated as a header to dodge cmd.exe macro-quoting pitfalls.
+# Best-effort: missing shard.yml/git just yields placeholder defines.
+$KirkVersion = "?"
+try {
+  $m = Select-String -LiteralPath (Join-Path $Root "shard.yml") -Pattern "^version:\s*(.+)$" | Select-Object -First 1
+  if ($m -and $m.Matches[0].Groups[1].Value.Trim()) { $KirkVersion = $m.Matches[0].Groups[1].Value.Trim().Trim('"', "'") }
+} catch { }
+$KirkCommit = "unknown"
+try {
+  $c = & git -C $Root rev-parse --short HEAD 2>$null
+  if ($LASTEXITCODE -eq 0 -and $c) { $KirkCommit = ([string]$c).Trim() }
+} catch { }
+$verHeader = '#pragma once' + "`r`n" + '#define KIRK_VERSION L"' + $KirkVersion.Replace('"', '') + '"' + "`r`n" + '#define KIRK_COMMIT L"' + $KirkCommit.Replace('"', '') + '"' + "`r`n"
+[IO.File]::WriteAllText((Join-Path $fullOut "kirk_version.h"), $verHeader)
+Write-Host "  version stamp: v$KirkVersion ($KirkCommit)"
 
 $objs = @()
 foreach ($s in $srcFiles) {

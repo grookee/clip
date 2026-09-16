@@ -45,15 +45,91 @@ $Vcvars = Find-Vcvars
 # 1. Native shim (does its own vcvars handling internally).
 & (Join-Path $PSScriptRoot "build_shim.ps1") -OutDir $OutDir
 
+# 1b. App icon resource for kirk.exe (title bar, taskbar, Alt-Tab, tray all
+# load icon id 1 from the exe). assets/logo.ico is the one true mark; the
+# generated fallback below only exists so a missing file still builds.
+$iconRes = $null
+try {
+  $icoPath = Join-Path $BuildDir "kirk.ico"
+  $logoSrc = Join-Path $Root "assets\logo.ico"
+  if (Test-Path $logoSrc) {
+    Copy-Item $logoSrc $icoPath -Force
+    Write-Host "Icon: using assets/logo.ico"
+  } else {
+    Write-Warning "assets/logo.ico missing - generating a fallback mark."
+    Add-Type -AssemblyName System.Drawing
+    # NOTE: plain foreach, not a pipeline - pipelines unroll byte[] into the
+    # output stream and corrupt the icon entries.
+    $iconPngs = @()
+    foreach ($size in @(16, 32, 48, 256)) {
+      $bmp = New-Object System.Drawing.Bitmap($size, $size)
+      try {
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+          $g.Clear([System.Drawing.Color]::FromArgb(0x1d, 0x20, 0x21))
+          $font = New-Object System.Drawing.Font("Segoe UI", ($size * 0.55), [System.Drawing.FontStyle]::Bold)
+          try {
+            $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(0xfe, 0x80, 0x19))
+            $sf = New-Object System.Drawing.StringFormat
+            $sf.Alignment = [System.Drawing.StringAlignment]::Center
+            $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $g.DrawString("K", $font, $brush, [System.Drawing.RectangleF]::new(0, 0, $size, $size), $sf)
+          } finally { $brush.Dispose() }
+        } finally { $g.Dispose(); $font.Dispose() }
+        $ms = New-Object System.IO.MemoryStream
+        try { $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $iconPngs += ,$ms.ToArray() }
+        finally { $ms.Dispose() }
+      } finally { $bmp.Dispose() }
+    }
+    $fs = [IO.File]::Create($icoPath)
+    try {
+      $bw = New-Object System.IO.BinaryWriter($fs)
+      $bw.Write([UInt16]0); $bw.Write([UInt16]1); $bw.Write([UInt16]$iconPngs.Count)
+      $offset = 6 + 16 * $iconPngs.Count
+      $idx = 0
+      $iconSizes = @(16, 32, 48, 256)
+      foreach ($png in $iconPngs) {
+        $w = $iconSizes[$idx]; $idx++
+        if ($w -ge 256) { $wb = 0 } else { $wb = $w }
+        $bw.Write([Byte]$wb); $bw.Write([Byte]$wb)
+        $bw.Write([Byte]0); $bw.Write([Byte]0)
+        $bw.Write([UInt16]1); $bw.Write([UInt16]32)
+        $bw.Write([UInt32]$png.Length); $bw.Write([UInt32]$offset)
+        $offset += $png.Length
+      }
+      foreach ($png in $iconPngs) { $bw.Write($png) }
+      $bw.Flush()
+    } finally { $fs.Close() }
+  }
+  $rcPath = Join-Path $BuildDir "kirk.rc"
+  [IO.File]::WriteAllText($rcPath, '1 ICON "' + $icoPath.Replace('\', '\\') + '"')
+  $kitsRoot = "C:\Program Files (x86)\Windows Kits\10\bin"
+  $rcExe = Get-ChildItem $kitsRoot -Recurse -Filter rc.exe -ErrorAction SilentlyContinue |
+    Sort-Object FullName -Descending | Select-Object -First 1
+  if ($rcExe) {
+    $resPath = Join-Path $BuildDir "kirk.res"
+    & $rcExe.FullName /nologo /fo $resPath $rcPath 2>&1 | Out-String | Write-Host
+    if ($LASTEXITCODE -ne 0) { throw "rc.exe failed" }
+    $iconRes = $resPath
+    Write-Host "Icon resource: $resPath"
+  } else {
+    Write-Warning "rc.exe not found under $kitsRoot - kirk.exe will have no icon resource."
+  }
+} catch {
+  Write-Warning "Icon resource build failed ($($_.Exception.Message)) - continuing without an exe icon."
+  $iconRes = $null
+}
+
 # 2. Crystal exe. Append the output dir to LIB so Crystal's
 #    @[Link("shim")] lookup finds build\shim.lib. (Note: Crystal honors
 #    LIB, not LIBRARY_PATH, for .lib lookup on Windows.)
 if ($env:LIB -notlike "*$BuildDir*") { $env:LIB = "$env:LIB;$BuildDir" }
 
 $release = if ($NoRelease) { "" } else { "--release" }
+$iconFlags = if ($iconRes) { ' --link-flags "' + $iconRes + '"' } else { "" }
 # NOTE: no `2>&1` here on purpose - merging native stderr turns Crystal's
 # warnings into PowerShell error records, which throw under Stop preference.
-& cmd.exe /d /c ('call "' + $Vcvars + '" >nul 2>&1 && crystal build src/kirk.cr -o ' + $OutDir + '\kirk.exe ' + $release)
+& cmd.exe /d /c ('call "' + $Vcvars + '" >nul 2>&1 && crystal build src/kirk.cr -o ' + $OutDir + '\kirk.exe ' + $release + $iconFlags)
 if ($LASTEXITCODE -ne 0) { throw "crystal build failed" }
 
 # 3. Stage vendor ffmpeg next to kirk.exe (exe-dir lookup) if missing, then

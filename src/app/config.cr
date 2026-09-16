@@ -22,13 +22,16 @@ module Kirk
     property hw_encoder : String = ""
 
     property capture_audio : Bool = true
-    property mic_device : String = "" # empty = system default mic (wasapi default)
+    property mic_device : String = "" # empty = system default mic (resolved to its dshow name)
     property audio_bitrate_kbps : Int32 = 192
 
     # Mini audio mixer: one primary mic + optional extra capture devices +
-    # optional system-output loopback (game / Discord), mixed into a single
-    # AAC track. Empty extra list / empty system device = off / default.
-    # Gains are linear multipliers (1.0 = unity), clamped to 0.0..2.0.
+    # optional loopback-capture device (Stereo Mix / VB-Cable output /
+    # Voicemeeter - game / Discord / system output), mixed into a single
+    # AAC track. Empty extra list = off. Empty system device = mics only
+    # (plain speakers are not capturable with this ffmpeg build, which has
+    # no wasapi loopback). Gains are linear multipliers (1.0 = unity),
+    # clamped to 0.0..2.0.
     property extra_audio_devices : Array(String) = [] of String
     property capture_system_audio : Bool = false
     property system_audio_device : String = ""
@@ -38,11 +41,19 @@ module Kirk
     # ";"-separated: phrases themselves contain commas, so "," fragments
     # every command into unmatchable pieces (silent voice-trigger failure).
     property voice_enabled : Bool = true
-    # SAPI confidence floor. Clear speech decodes at 0.017-0.041 while room
-    # noise emits no text, so the word match itself is the signal; the old
-    # 0.60 default could never fire.
+    # SAPI confidence floor. SAPI force-maps ANY speech onto the closest
+    # grammar phrase at low confidence (clear commands and Discord chatter
+    # decode in the same range), so the floor alone cannot separate them:
+    # the chatter-burst gate in voice.cr does. Tune via Settings > Voice or
+    # watch the `voice: heard ...` lines in kirk.log.
     property voice_confidence : Float64 = 0.01
     property voice_cooldown_ms : Int32 = 2500
+    # Chatter-burst gate: a floor-passing candidate inside this window after
+    # the previous contender needs voice_high_confidence to fire. Deliberate
+    # commands are isolated; conversation comes in bursts.
+    property voice_isolation_ms : Int32 = 1200
+    # Confidence that bypasses the burst gate (clamped to >= floor at use).
+    property voice_high_confidence : Float64 = 0.5
     property voice_command : String = "Kirk, clip that!;" \
                                       "Kirk clip that;" \
                                       "Kirk, clip it!;" \
@@ -126,13 +137,10 @@ module Kirk
       self.extra_audio_devices = clean
       self.mic_gain = 1.0 if mic_gain < 0.0 || mic_gain > 2.0
       self.system_gain = 1.0 if system_gain < 0.0 || system_gain > 2.0
-      # The stale 0.60 default never fires where SAPI decodes at 0.017-0.041;
-      # migrate exactly that value, leave explicit user values untouched.
-      if voice_confidence == 0.60
-        self.voice_confidence = 0.01
-        Log.info { "config: migrated stale voice_confidence 0.60 -> 0.01 (see voice log lines to tune)" }
-      end
       self.voice_confidence = 0.01 if voice_confidence < 0.0 || voice_confidence > 1.0
+      self.voice_high_confidence = 0.5 if voice_high_confidence < 0.0 || voice_high_confidence > 1.0
+      self.voice_cooldown_ms = 2500 if voice_cooldown_ms < 250 || voice_cooldown_ms > 15000
+      self.voice_isolation_ms = 1200 if voice_isolation_ms < 0 || voice_isolation_ms > 10000
       self
     end
 

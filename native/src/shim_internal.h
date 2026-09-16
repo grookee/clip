@@ -5,7 +5,7 @@
 #define COBJMACROS
 #define INITGUID
 
-// NOTE (Google style exception): Windows SDK order matters here —
+// NOTE (Google style exception): Windows SDK order matters here -
 // <windows.h> + <objbase.h> must come before <mmdeviceapi.h> /
 // <functiondiscoverykeys_devpkey.h>, so this group is dependency-ordered,
 // not alphabetical.

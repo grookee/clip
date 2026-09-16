@@ -55,8 +55,42 @@ Copy-Item (Join-Path $binDir "*.dll") $Stage -Force
 $chimeStaged = Join-Path $binDir "clip.wav"
 if (Test-Path $chimeStaged) { Copy-Item $chimeStaged $Stage -Force }
 
-# 3. Tile art, generated so the repo stays binary-free.
+# 3. Tile art. assets/logo.ico is the one true mark: tiles are resized from
+# its largest embedded image. Without it, fall back to the generated "K"
+# so the repo still packages.
 Add-Type -AssemblyName System.Drawing
+# Largest embedded image via WPF's icon decoder (handles classic BMP entries
+# that System.Drawing.Bitmap.FromStream chokes on).
+function Get-LogoBitmap([string]$icoPath) {
+  Add-Type -AssemblyName PresentationCore
+  $fs = [IO.File]::OpenRead($icoPath)
+  try {
+    $dec = New-Object System.Windows.Media.Imaging.IconBitmapDecoder($fs, [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+    $frame = $dec.Frames | Sort-Object { $_.PixelWidth * $_.PixelHeight } -Descending | Select-Object -First 1
+    if (-not $frame) { throw "no frames in $icoPath" }
+    $enc = New-Object System.Windows.Media.Imaging.BmpBitmapEncoder
+    $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($frame))
+    $ms = New-Object System.IO.MemoryStream
+    try {
+      $enc.Save($ms)
+      $ms.Position = 0
+      $tmp = New-Object System.Drawing.Bitmap($ms)
+      try { return (New-Object System.Drawing.Bitmap($tmp)) }
+      finally { $tmp.Dispose() }
+    } finally { $ms.Dispose() }
+  } finally { $fs.Close() }
+}
+function New-TileFromLogo([int]$size, [string]$path, [System.Drawing.Bitmap]$logo) {
+  $bmp = New-Object System.Drawing.Bitmap($size, $size)
+  try {
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+      $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $g.DrawImage($logo, 0, 0, $size, $size)
+    } finally { $g.Dispose() }
+    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  } finally { $bmp.Dispose() }
+}
 function New-Tile([int]$size, [string]$path) {
   $bmp = New-Object System.Drawing.Bitmap($size, $size)
   try {
@@ -78,6 +112,16 @@ function New-Tile([int]$size, [string]$path) {
 New-Tile 50 (Join-Path $Assets "StoreLogo.png")
 New-Tile 44 (Join-Path $Assets "Square44x44Logo.png")
 New-Tile 150 (Join-Path $Assets "Square150x150Logo.png")
+$logoIco = Join-Path $Root "assets\logo.ico"
+if (Test-Path $logoIco) {
+  Write-Host "Tiles: deriving from assets/logo.ico"
+  $logo = Get-LogoBitmap $logoIco
+  try {
+    New-TileFromLogo 50 (Join-Path $Assets "StoreLogo.png") $logo
+    New-TileFromLogo 44 (Join-Path $Assets "Square44x44Logo.png") $logo
+    New-TileFromLogo 150 (Join-Path $Assets "Square150x150Logo.png") $logo
+  } finally { $logo.Dispose() }
+}
 
 # 4. Manifest: full-trust desktop-bridge app (no UWP sandbox).
 $manifest = @"

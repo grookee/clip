@@ -108,13 +108,14 @@ module Kirk
     def run : Int32
       Application.instance = self
 
-      Log.info { "kirk starting (cwd=#{Dir.current}, voice_enabled=#{@cfg.voice_enabled}, conf=#{@cfg.voice_confidence}, cooldown=#{@cfg.voice_cooldown_ms}ms, mic=#{@cfg.mic_device.inspect})" }
+      Log.info { "kirk starting (cwd=#{Dir.current}, voice_enabled=#{@cfg.voice_enabled}, conf=#{@cfg.voice_confidence}/high=#{@cfg.voice_high_confidence}, cooldown=#{@cfg.voice_cooldown_ms}ms, isolation=#{@cfg.voice_isolation_ms}ms, mic=#{@cfg.mic_device.inspect})" }
 
       wc = Win32::User32::WNDCLASSW.new
       wc.lpfn_wnd_proc = ->Application.wnd_proc(Win32::HWND, UInt32, Win32::WPARAM, Win32::LPARAM)
       wc.h_instance = Win32.get_module_handle
       class_name = "KirkHidden"
       wc.lpsz_class_name = Win32.to_wstr(class_name)
+      wc.h_icon = Win32.app_icon
       wc.h_cursor = Win32.load_cursor(Pointer(Void).null, 32512_u32) # IDC_ARROW
 
       if Win32.register_class(pointerof(wc)) == 0
@@ -413,7 +414,7 @@ module Kirk
     end
 
     # On voice start failure, checks whether a speech prerequisite is missing
-    # and — once per process — shows a balloon plus a Yes/No popup that opens
+    # and - once per process - shows a balloon plus a Yes/No popup that opens
     # the right Settings page. Returns true when such a specific prompt was
     # shown, so callers skip their generic "see kirk.log" balloon.
     private def maybe_prompt_for_speech_install : Bool
@@ -596,7 +597,9 @@ module Kirk
       if old.voice_enabled != @cfg.voice_enabled ||
          old.voice_command != @cfg.voice_command ||
          old.voice_confidence != @cfg.voice_confidence ||
+         old.voice_high_confidence != @cfg.voice_high_confidence ||
          old.voice_cooldown_ms != @cfg.voice_cooldown_ms ||
+         old.voice_isolation_ms != @cfg.voice_isolation_ms ||
          old.mic_device != @cfg.mic_device
         restart_voice
       end

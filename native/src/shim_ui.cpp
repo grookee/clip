@@ -3,7 +3,7 @@
 #define INITGUID
 
 // NOTE (Google style exception): Windows SDK dependency order, not
-// alphabetical — <windows.h> first, then the rest; shim.h last because it
+// alphabetical - <windows.h> first, then the rest; shim.h last because it
 // needs HWND from <windows.h>.
 #include <windows.h>
 #include <windowsx.h>
@@ -218,7 +218,10 @@ static void draw_text(HDC dc, const wchar_t *s, const RECT *r, COLORREF c,
   int bm = SetBkMode(dc, TRANSPARENT);
   HFONT of = (HFONT)SelectObject(dc, f);
   SetTextColor(dc, c);
-  DrawTextW(dc, s, -1, (RECT *)r, fmt);
+  // NOPREFIX throughout: labels carry "&" (e.g. "recording & storage") and
+  // device names may too - without this DrawText eats the & and underlines
+  // the next character as a mnemonic that does nothing when clicked.
+  DrawTextW(dc, s, -1, (RECT *)r, fmt | DT_NOPREFIX);
   SelectObject(dc, of);
   SetBkMode(dc, bm);
 }
@@ -439,9 +442,10 @@ struct UI {
   std::vector<RECT> hdr;
   std::vector<std::wstring> mic_items;
   std::vector<std::wstring> extra_items;   // "(None)" + capture devices
-  std::vector<std::wstring> render_items;  // "(Default output)" + render devices
+  std::vector<std::wstring> syscap_items;  // "(None)" + capture devices (loopback sources)
 
   HFONT fTitle = nullptr, fSec = nullptr, fLbl = nullptr, fVal = nullptr, fBtn = nullptr;
+  HFONT fSmall = nullptr;  // version stamp in the footer margin
   HBRUSH brEdit = nullptr;
 
   // Cached GDI resources: created once per dialog (and rebuilt on DPI
@@ -518,7 +522,7 @@ static UI *g_popup_ui = nullptr;
 static int g_popup_field = 0;
 static int g_popup_hover = -1;
 // First visible row in the dropdown popup. The popup window is capped at 12
-// rows, but lists like the mic enumeration can be longer — without this the
+// rows, but lists like the mic enumeration can be longer - without this the
 // entries below the fold were painted off-window and unreachable.
 static int g_popup_top = 0;
 
@@ -711,7 +715,39 @@ static void hotkey_text(int vk, int mod, wchar_t *out, int n) {
 }
 
 
+#define KIRK_ICON_ID 1
+
+// Baked in by scripts/build_shim.ps1 (build/kirk_version.h from shard.yml +
+// git). Fallbacks keep local hand-compiles working without the script.
+#if defined(__has_include)
+#if __has_include("kirk_version.h")
+#include "kirk_version.h"
+#endif
+#endif
+#ifndef KIRK_VERSION
+#define KIRK_VERSION L"?"
+#endif
+#ifndef KIRK_COMMIT
+#define KIRK_COMMIT L"unknown"
+#endif
+
+// Single app icon, loaded from kirk.exe's own resources so the title bar,
+// taskbar, Alt-Tab and tray all show the same mark. Falls back to the
+// system application icon when the exe carries no icon resource (e.g. a
+// hand-built binary from before the .rc was wired in).
 static HICON app_icon(void) {
+  HICON ic = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(KIRK_ICON_ID),
+                               IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+                               LR_SHARED);
+  if (ic) return ic;
+  return LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+}
+
+static HICON app_icon_small(void) {
+  HICON ic = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(KIRK_ICON_ID),
+                               IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                               LR_SHARED);
+  if (ic) return ic;
   return LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 }
 
@@ -719,7 +755,7 @@ static HICON app_icon(void) {
 static void ui_free_layout_items(UI *u) {
   for (auto &fd : u->f) {
     if ((fd.type == FT_COMBO && fd.items && fd.items != &u->mic_items &&
-         fd.items != &u->extra_items && fd.items != &u->render_items) ||
+         fd.items != &u->extra_items && fd.items != &u->syscap_items) ||
         (fd.type == FT_PRESET && fd.items)) {
       delete fd.items;
       fd.items = nullptr;
@@ -803,6 +839,8 @@ static void ui_layout(UI *u) {
   }
   if (u->S.mic_gain_pct < 0 || u->S.mic_gain_pct > 200) u->S.mic_gain_pct = 100;
   if (u->S.system_gain_pct < 0 || u->S.system_gain_pct > 200) u->S.system_gain_pct = 100;
+  if (u->S.voice_confidence_pct < 1 || u->S.voice_confidence_pct > 100) u->S.voice_confidence_pct = 1;
+  if (u->S.voice_cooldown_ms < 250 || u->S.voice_cooldown_ms > 15000) u->S.voice_cooldown_ms = 2500;
 
   // Top inset so the first card never sits flush under the header line.
   int y = u->scroll_top + S(8);
@@ -904,11 +942,11 @@ static void ui_layout(UI *u) {
   add_info(25, L"Mix a second capture device in (e.g. a separate Discord mic). More than two? Add them in kirk.yml as extra_audio_devices.");
   push_row(FT_TOGGLE, 26, L"Capture system audio");
   u->f.back().pflag = &u->S.capture_system_audio;
-  add_info(26, L"Mix in game / Discord / system output via loopback so it lands in clips, not just your speakers.");
+  add_info(26, L"Mix in game / Discord / system output via a loopback capture device below, so it lands in clips, not just your speakers.");
   push_row(FT_COMBO, 27, L"System audio source");
-  u->f.back().items = &u->render_items;
+  u->f.back().items = &u->syscap_items;
   u->f.back().psel = &u->sysDevSel;
-  add_info(27, L"Which output to loop back. Default follows Windows' default speakers.");
+  add_info(27, L"Loopback capture device carrying system output (Stereo Mix, VB-Cable output, Voicemeeter...). (None) = mics only. Plain speakers cannot be captured with this ffmpeg build.");
   push_row(FT_STEP, 28, L"Mic gain");
   u->f.back().pval = (int *)&u->S.mic_gain_pct; u->f.back().vmin = 0; u->f.back().vmax = 200;
   u->f.back().step_inc = 5;
@@ -932,6 +970,16 @@ static void ui_layout(UI *u) {
   push_row(FT_TOGGLE, 15, L"Voice commands (\u201CKirk, clip that!\u201D)");
   u->f.back().pflag = &u->S.voice_enabled;
   add_info(15, L"Speak \u201CKirk, clip that!\u201D to save a clip hands-free. Always listens on the system default mic (independent of Capture microphone). Hover the tray icon to see listening status.");
+  push_row(FT_STEP, 31, L"Voice sensitivity");
+  u->f.back().pval = (int *)&u->S.voice_confidence_pct; u->f.back().vmin = 1; u->f.back().vmax = 100;
+  u->f.back().step_inc = 1;
+  u->f.back().suffix = L" %";
+  add_info(31, L"Minimum speech confidence to accept a command. Higher = fewer false clips while chatting on Discord, but mumbled commands may be missed. Watch the voice: lines in kirk.log to tune.");
+  push_row(FT_STEP, 32, L"Voice cooldown");
+  u->f.back().pval = (int *)&u->S.voice_cooldown_ms; u->f.back().vmin = 250; u->f.back().vmax = 15000;
+  u->f.back().step_inc = 250;
+  u->f.back().suffix = L" ms";
+  add_info(32, L"Repeat commands are ignored inside this window after a command fires.");
   end_card();
 
   begin_card(L"Storage");
@@ -1626,6 +1674,8 @@ static void ui_reset_defaults(UI *u) {
   u->S.system_audio_device[0] = 0;
   u->S.mic_gain_pct = 100;
   u->S.system_gain_pct = 100;
+  u->S.voice_confidence_pct = 1;
+  u->S.voice_cooldown_ms = 2500;
   u->S.clips_dir[0] = 0;
   wcsncpy_s(u->S.clip_name_pattern, KIRK_STR_LEN, L"clip-{timestamp}.mp4", _TRUNCATE);
   u->S.hotkey_clip_mod = 0; u->S.hotkey_clip_vk = 0x77;
@@ -1744,16 +1794,22 @@ static void finish_dialog(UI *u, bool saved) {
     } else {
       wcsncpy_s(u->S.extra_audio_device, KIRK_STR_LEN, u->extra_items[(size_t)u->extraSel].c_str(), _TRUNCATE);
     }
-    // System loopback source: render_items[0] is "(Default output)".
-    if (u->sysDevSel <= 0 || u->sysDevSel >= (int)u->render_items.size()) {
+    // System audio source: syscap_items[0] is "(None)"; sysDevSel is a
+    // direct index into the capture-device list (loopback sources such as
+    // Stereo Mix / VB-Cable / Voicemeeter). The old render-device value
+    // never worked with this ffmpeg build, so unmatched legacy values fall
+    // back to off.
+    if (u->sysDevSel <= 0 || u->sysDevSel >= (int)u->syscap_items.size()) {
       u->S.system_audio_device[0] = 0;
-    } else if (u->render_items[(size_t)u->sysDevSel] == L"(Default output)") {
+    } else if (u->syscap_items[(size_t)u->sysDevSel] == L"(None)") {
       u->S.system_audio_device[0] = 0;
     } else {
-      wcsncpy_s(u->S.system_audio_device, KIRK_STR_LEN, u->render_items[(size_t)u->sysDevSel].c_str(), _TRUNCATE);
+      wcsncpy_s(u->S.system_audio_device, KIRK_STR_LEN, u->syscap_items[(size_t)u->sysDevSel].c_str(), _TRUNCATE);
     }
     if (u->S.mic_gain_pct < 0 || u->S.mic_gain_pct > 200) u->S.mic_gain_pct = 100;
     if (u->S.system_gain_pct < 0 || u->S.system_gain_pct > 200) u->S.system_gain_pct = 100;
+    if (u->S.voice_confidence_pct < 1 || u->S.voice_confidence_pct > 100) u->S.voice_confidence_pct = 1;
+    if (u->S.voice_cooldown_ms < 250 || u->S.voice_cooldown_ms > 15000) u->S.voice_cooldown_ms = 2500;
     // 4-way feedback combo -> two ABI flags.
     {
       int sel = u->feedbackSel;
@@ -1773,7 +1829,7 @@ static void finish_dialog(UI *u, bool saved) {
     // (PostMessage here used to race the loop's WM_QUIT exit: the save
     // result was sometimes never dispatched, and the thread-wide
     // PostQuitMessage below was consumed by the modal loop instead of the
-    // app loop — so closing Settings swallowed an app-level Quit/WM_CLOSE
+    // app loop - so closing Settings swallowed an app-level Quit/WM_CLOSE
     // and the process lingered until killed.)
     SendMessageW(u->owner, u->done_msg, saved ? 1 : 0, 0);
   }
@@ -2017,6 +2073,13 @@ static void ui_paint(UI *u, HDC dc, RECT client) {
   draw_text(dc, L"Cancel", &u->rcCancel, GV_FG1, u->fBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   ui_fill_round(dc, &u->rcSave, u->brOrg, u->R_ctrl());
   draw_text(dc, L"Save", &u->rcSave, GV_BG0H, u->fBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  // Build stamp in the bottom margin strip, right-aligned under the buttons.
+  wchar_t ver[96];
+  swprintf_s(ver, 96, L"v%s \u00B7 %s", KIRK_VERSION, KIRK_COMMIT);
+  RECT vr = {u->rcReset.right + u->S_(12), u->clientH - u->S_(17),
+             u->clientW - u->S_(26), u->clientH - u->S_(2)};
+  draw_text(dc, ver, &vr, GV_GRAY, u->fSmall ? u->fSmall : u->fLbl,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 static void ui_make_resources(UI *u) {
@@ -2067,6 +2130,8 @@ static void ui_make_fonts(UI *u) {
   u->fLbl   = make_font_dpi(9, FW_NORMAL, false, (UINT)u->dpi);
   u->fVal   = make_font_dpi(10, FW_NORMAL, false, (UINT)u->dpi);
   u->fBtn   = make_font_dpi(10, FW_SEMIBOLD, false, (UINT)u->dpi);
+  if (u->fSmall) DeleteObject(u->fSmall);
+  u->fSmall = make_font_dpi(7, FW_NORMAL, false, (UINT)u->dpi);
   for (auto &fd : u->f) {
     if (fd.type == FT_EDIT && fd.edit) SendMessageW(fd.edit, WM_SETFONT, (WPARAM)u->fVal, TRUE);
   }
@@ -2234,7 +2299,7 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
       if (PtInRect(&u->rcReset, pt)) {
         int rc = MessageBoxW(h,
           L"Reset all settings to the recommended defaults?\n\nYour current values will be replaced in this dialog. Nothing is saved until you press Save.",
-          L"kirk \u2014 Reset to defaults", MB_YESNO | MB_ICONQUESTION);
+          L"kirk - Reset to defaults", MB_YESNO | MB_ICONQUESTION);
         if (rc == IDYES) ui_reset_defaults(u);
         return 0;
       }
@@ -2251,7 +2316,7 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if (sub == HS_RESET) {
           int rc = MessageBoxW(h,
             L"Reset all settings to the recommended defaults?\n\nYour current values will be replaced in this dialog. Nothing is saved until you press Save.",
-            L"kirk \u2014 Reset to defaults", MB_YESNO | MB_ICONQUESTION);
+            L"kirk - Reset to defaults", MB_YESNO | MB_ICONQUESTION);
           if (rc == IDYES) ui_reset_defaults(u);
         }
         else if (old >= 0 && old < (int)u->f.size()) ui_invalidate_field(u, u->f[old]);
@@ -2466,7 +2531,7 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // keyboard safety: bare letters/numbers would swallow typing
         if (mod == 0 && !(vk >= VK_F1 && vk <= VK_F24)) {
           MessageBoxW(h, L"Add a modifier (Ctrl/Alt/Shift) or use a function key (F1-F24).",
-                      L"kirk \u2014 Hotkey", MB_OK | MB_ICONINFORMATION);
+                      L"kirk - Hotkey", MB_OK | MB_ICONINFORMATION);
           return 0;
         }
 
@@ -2475,12 +2540,12 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         bool same = (cur_vk == vk && cur_mod == mod);
         if (!same && hk_conflicts_with_other(u, cap->id, vk, mod)) {
           MessageBoxW(h, L"That combination is already used by another kirk action. Choose a different one.",
-                      L"kirk \u2014 Hotkey conflict", MB_OK | MB_ICONWARNING);
+                      L"kirk - Hotkey conflict", MB_OK | MB_ICONWARNING);
           return 0;
         }
         if (!same && !hk_try_register(u, vk, mod)) {
-          MessageBoxW(h, L"That combination is unavailable \u2014 another application is already using it. Choose a different one.",
-                      L"kirk \u2014 Hotkey unavailable", MB_OK | MB_ICONWARNING);
+          MessageBoxW(h, L"That combination is unavailable - another application is already using it. Choose a different one.",
+                      L"kirk - Hotkey unavailable", MB_OK | MB_ICONWARNING);
           return 0;
         }
 
@@ -2589,7 +2654,8 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
       DeleteObject(u->fLbl);
       DeleteObject(u->fVal);
       DeleteObject(u->fBtn);
-      u->fTitle = u->fSec = u->fLbl = u->fVal = u->fBtn = nullptr;
+      if (u->fSmall) DeleteObject(u->fSmall);
+      u->fTitle = u->fSec = u->fLbl = u->fVal = u->fBtn = u->fSmall = nullptr;
       ui_free_resources(u);
       // Never PostQuitMessage here: the quit is thread-wide and would be
       // consumed by this dialog's modal loop instead of the app's message
@@ -2631,7 +2697,7 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
 
   u->mic_items.push_back(L"(System default)");
   u->extra_items.push_back(L"(None)");
-  u->render_items.push_back(L"(Default output)");
+  u->syscap_items.push_back(L"(None)");
   u->micSel = 0;
   u->extraSel = 0;
   u->sysDevSel = 0;
@@ -2648,6 +2714,7 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
         std::wstring name = devs.devices[i].name ? devs.devices[i].name : L"(unknown)";
         u->mic_items.push_back(name);
         u->extra_items.push_back(name);
+        u->syscap_items.push_back(name);
         if (devs.devices[i].name && u->S.mic_device[0] &&
             wcscmp(devs.devices[i].name, u->S.mic_device) == 0) {
           u->micSel = (int)i + 1;
@@ -2656,21 +2723,12 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
             wcscmp(devs.devices[i].name, u->S.extra_audio_device) == 0) {
           u->extraSel = (int)i + 1;
         }
-      }
-      kirk_audio_enum_free(&devs);
-    }
-    kirk_audio_device_list outs;
-    memset(&outs, 0, sizeof(outs));
-    if (kirk_audio_enum_render(&outs) == 0) {
-      for (uint32_t i = 0; i < outs.count; i++) {
-        std::wstring name = outs.devices[i].name ? outs.devices[i].name : L"(unknown)";
-        u->render_items.push_back(name);
-        if (outs.devices[i].name && u->S.system_audio_device[0] &&
-            wcscmp(outs.devices[i].name, u->S.system_audio_device) == 0) {
+        if (devs.devices[i].name && u->S.system_audio_device[0] &&
+            wcscmp(devs.devices[i].name, u->S.system_audio_device) == 0) {
           u->sysDevSel = (int)i + 1;
         }
       }
-      kirk_audio_enum_free(&outs);
+      kirk_audio_enum_free(&devs);
     }
     if (SUCCEEDED(cok)) CoUninitialize();
   }
@@ -2701,7 +2759,7 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
   g_ui = u;
 
   // Per-monitor DPI at the cursor (where the window will appear), not the
-  // system-wide DC value — fixes blurry/upscaled rendering at 125-200%.
+  // system-wide DC value - fixes blurry/upscaled rendering at 125-200%.
   {
     POINT cur = {0, 0};
     GetCursorPos((LPPOINT)&cur);
@@ -2711,15 +2769,17 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
   u->k = (float)u->dpi / 96.0f;
   ui_layout(u);
 
-  WNDCLASSW wc;
+  WNDCLASSEXW wc;
   memset(&wc, 0, sizeof(wc));
+  wc.cbSize = sizeof(wc);
   wc.lpfnWndProc = (WNDPROC)ui_wndproc;
   wc.hInstance = GetModuleHandleW(nullptr);
   wc.hIcon = app_icon();
+  wc.hIconSm = app_icon_small();
   wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
   wc.hbrBackground = nullptr;
   wc.lpszClassName = L"KirkSettingsWnd";
-  RegisterClassW(&wc);
+  RegisterClassExW(&wc);
 
   // pick a default height: fit the monitor where the window opens, else scroll
   RECT work = {0, 0, 0, 0};
@@ -2756,7 +2816,7 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
   if (cx < work.left) cx = work.left;
   if (cy < work.top) cy = work.top;
   u->hwnd = CreateWindowExW(
-    0, L"KirkSettingsWnd", L"kirk \u2014 Settings",
+    0, L"KirkSettingsWnd", L"kirk - Settings",
     style,
     cx, cy, ww, wh,
     owner, nullptr, wc.hInstance, (LPVOID)u);
@@ -2768,11 +2828,16 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
     return 0;
   }
   SetWindowLongPtrW(u->hwnd, GWLP_USERDATA, (LONG_PTR)u);
+  // Explicit per-window icons: the class icons cover this, but stating it
+  // again keeps the title bar, taskbar button and Alt-Tab switcher in sync
+  // even if the class gets re-registered by a later dialog.
+  SendMessageW(u->hwnd, WM_SETICON, ICON_BIG, (LPARAM)app_icon());
+  SendMessageW(u->hwnd, WM_SETICON, ICON_SMALL, (LPARAM)app_icon_small());
   ShowWindow(u->hwnd, SW_SHOWNORMAL);
   SetForegroundWindow(u->hwnd);
 
   // Modal loop on the calling thread. Exits when the dialog is destroyed
-  // (`closed`, set in WM_DESTROY) — never via PostQuitMessage, which is
+  // (`closed`, set in WM_DESTROY) - never via PostQuitMessage, which is
   // thread-wide and used to swallow app-level Quit/WM_CLOSE posted while
   // Settings was open (the 15s harness timeout / lingering process). An
   // app quit arriving mid-modal is re-posted so the app loop still quits.

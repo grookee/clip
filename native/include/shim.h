@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 // NOTE (Google style exception): no <windows.h> here on purpose. It needs
-// COBJMACROS/INITGUID defined first, and this header needs HWND from it —
+// COBJMACROS/INITGUID defined first, and this header needs HWND from it -
 // so every TU includes <windows.h> (via shim_internal.h or directly) before
 // this header. wchar_t/uint32_t come from the includes above.
 
@@ -126,6 +126,9 @@ typedef struct {
   int32_t  mic_gain_pct;                  /* 0..200, 100 = unity */
   int32_t  system_gain_pct;               /* 0..200, 100 = unity */
   int32_t  play_save_sound;               /* chime on clip save (Clip.wav) */
+  /* Voice tuning (appended; keep existing order stable for FFI). */
+  int32_t  voice_confidence_pct;          /* 1..100, SAPI floor as percent */
+  int32_t  voice_cooldown_ms;             /* ignore repeat commands, 250..15000 */
 } kirk_settings;
 
 /// Opens the settings dialog. Blocking modal loop; returns 1 on success.

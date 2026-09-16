@@ -6,7 +6,7 @@
 
 ~ tiny gameplay clipping for windows.
 
-hit a hotkey, keep the last n seconds. everything runs locally — no accounts,
+hit a hotkey, keep the last n seconds. everything runs locally - no accounts,
 no cloud, no telemetry.
 
 ## features
@@ -68,11 +68,15 @@ the main knobs:
 | `mic_device`         | primary mic, `""` = system default mic       |
 | `extra_audio_devices`| extra mics mixed in (list, e.g. `["Yeti"]`)  |
 | `capture_system_audio` | loop back game/discord output into clips   |
-| `system_audio_device`| loopback source, `""` = default output       |
+| `system_audio_device`| loopback *capture* device (e.g. `Stereo Mix`, `CABLE-A Output`), `""` = mics only |
 | `mic_gain`           | mic loudness, `1.0` = unity (0..2)           |
 | `system_gain`        | system-audio loudness, `1.0` = unity (0..2)  |
 | `voice_enabled`      | voice commands on/off                    |
 | `voice_command`      | `;`-separated trigger phrases            |
+| `voice_confidence`   | accept floor, `0.01` = lenient (tune in Settings > Voice) |
+| `voice_cooldown_ms`  | repeat-command ignore window              |
+| `voice_isolation_ms` | chatter-burst window (kirk.yml only)      |
+| `voice_high_confidence` | bypasses the burst gate (kirk.yml only) |
 | `hotkey_clip_vk`     | clip hotkey (`0x77` = f8)                |
 | `storage_limit_gb`   | max clip folder size                     |
 | `clips_dir`          | `""` = default clips folder              |
