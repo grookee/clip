@@ -420,6 +420,8 @@ struct UI {
   std::vector<Card> cards;
   std::vector<RECT> hdr;
   std::vector<std::wstring> mic_items;
+  std::vector<std::wstring> extra_items;   // "(None)" + capture devices
+  std::vector<std::wstring> render_items;  // "(Default output)" + render devices
 
   HFONT fTitle = nullptr, fSec = nullptr, fLbl = nullptr, fVal = nullptr, fBtn = nullptr;
   HBRUSH brEdit = nullptr;
@@ -435,6 +437,7 @@ struct UI {
 
   kirk_settings S;
   int micSel = 0, encSel = 0, presetSel = 2, resSel = 0;
+  int extraSel = 0, sysDevSel = 0;
   bool fpsCustom = false, vbrCustom = false, abrCustom = false;
   int clientW = 0, clientH = 0;
 
@@ -688,7 +691,8 @@ static HICON app_icon(void) {
 
 static void ui_free_layout_items(UI *u) {
   for (auto &fd : u->f) {
-    if ((fd.type == FT_COMBO && fd.items && fd.items != &u->mic_items) ||
+    if ((fd.type == FT_COMBO && fd.items && fd.items != &u->mic_items &&
+         fd.items != &u->extra_items && fd.items != &u->render_items) ||
         (fd.type == FT_PRESET && fd.items)) {
       delete fd.items;
       fd.items = nullptr;
@@ -757,7 +761,7 @@ static void ui_layout(UI *u) {
   u->scroll_top = S(92);
 
   u->f.clear();
-  u->f.reserve(24);
+  u->f.reserve(32);
   u->cards.clear();
 
   // Sanitize meaningless zeros loaded from old configs before layout.
@@ -770,6 +774,8 @@ static void ui_layout(UI *u) {
   if (u->S.clip_name_pattern[0] == 0) {
     wcsncpy_s(u->S.clip_name_pattern, KIRK_STR_LEN, L"clip-{timestamp}.mp4", _TRUNCATE);
   }
+  if (u->S.mic_gain_pct < 0 || u->S.mic_gain_pct > 200) u->S.mic_gain_pct = 100;
+  if (u->S.system_gain_pct < 0 || u->S.system_gain_pct > 200) u->S.system_gain_pct = 100;
 
   // Top inset so the first card never sits flush under the header line.
   int y = u->scroll_top + S(8);
@@ -858,14 +864,35 @@ static void ui_layout(UI *u) {
   add_info(24, L"Downscale before encoding. Native 4K60 is heavy; 1080p fixes most lag with barely visible loss. Custom values can be set in kirk.yml.");
   end_card();
 
-  begin_card(L"Audio / microphone");
+  begin_card(L"Audio mixer");
   push_row(FT_COMBO, 4, L"Recording mic");
   u->f.back().items = &u->mic_items;
   u->f.back().psel = &u->micSel;
-  add_info(4, L"Microphone baked into recorded clips. Voice commands always use the system default mic, not this setting.");
+  add_info(4, L"Microphone baked into recorded clips. (System default) follows Windows' default mic. Voice commands always use the system default mic, not this setting.");
+  push_row(FT_COMBO, 25, L"Second mic (optional)");
+  u->f.back().items = &u->extra_items;
+  u->f.back().psel = &u->extraSel;
+  add_info(25, L"Mix a second capture device in (e.g. a separate Discord mic). More than two? Add them in kirk.yml as extra_audio_devices.");
+  push_row(FT_TOGGLE, 26, L"Capture system audio");
+  u->f.back().pflag = &u->S.capture_system_audio;
+  add_info(26, L"Mix in game / Discord / system output via loopback so it lands in clips, not just your speakers.");
+  push_row(FT_COMBO, 27, L"System audio source");
+  u->f.back().items = &u->render_items;
+  u->f.back().psel = &u->sysDevSel;
+  add_info(27, L"Which output to loop back. Default follows Windows' default speakers.");
+  push_row(FT_STEP, 28, L"Mic gain");
+  u->f.back().pval = (int *)&u->S.mic_gain_pct; u->f.back().vmin = 0; u->f.back().vmax = 200;
+  u->f.back().step_inc = 5;
+  u->f.back().suffix = L" %";
+  add_info(28, L"Microphone loudness in the mix. 100% = unchanged.");
+  push_row(FT_STEP, 29, L"System gain");
+  u->f.back().pval = (int *)&u->S.system_gain_pct; u->f.back().vmin = 0; u->f.back().vmax = 200;
+  u->f.back().step_inc = 5;
+  u->f.back().suffix = L" %";
+  add_info(29, L"Game / Discord loudness in the mix. 100% = unchanged.");
   push_row(FT_TOGGLE, 6, L"Capture microphone");
   u->f.back().pflag = &u->S.capture_audio;
-  add_info(6, L"Adds mic audio to recordings. Does NOT affect voice commands (they always listen on the system default mic).");
+  add_info(6, L"Master switch for ALL clip audio (mics + system). Does NOT affect voice commands (they always listen on the system default mic).");
   push_row(FT_PRESET, 5, L"Audio bitrate");
   ui_make_preset(u, u->f.back(), ABR_VALS, ABR_LABELS, 4,
                  (int *)&u->S.audio_bitrate_kbps, 32, 512, 16, L" kbps", &u->abrCustom);
@@ -1038,7 +1065,7 @@ static void popup_open(UI *u, CField &fd) {
   int shown = count < 12 ? count : 12;
   int h = padY * 2 + shown * itemH;
 
-  POINT pt = {fd.ctrl.left, fd.ctrl.top - u->scroll_y};
+  POINT pt = {fd.ctrl.left, fd.ctrl.bottom - u->scroll_y + u->S_(4)};
   ClientToScreen(u->hwnd, &pt);
 
   MONITORINFO mi;
@@ -1046,7 +1073,21 @@ static void popup_open(UI *u, CField &fd) {
   mi.cbSize = sizeof(mi);
   HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
   GetMonitorInfoW(mon, &mi);
-  if (pt.y + h > mi.rcWork.bottom) pt.y = mi.rcWork.bottom - h;
+  // Open below the control like a real dropdown. The old code opened AT the
+  // control's top edge, so the popup covered the control and the opening
+  // click's cursor sat on top of row 0: any jitter committed the row above
+  // the intended one. Below-control placement keeps the cursor outside the
+  // popup until the user deliberately moves into it.
+  if (pt.y + h > mi.rcWork.bottom) {
+    // No room below: flip above the control.
+    POINT ptAbove = {fd.ctrl.left, fd.ctrl.top - u->scroll_y - u->S_(4) - h};
+    ClientToScreen(u->hwnd, &ptAbove);
+    if (ptAbove.y >= mi.rcWork.top) {
+      pt = ptAbove;
+    } else {
+      pt.y = mi.rcWork.bottom - h;
+    }
+  }
   if (pt.y < mi.rcWork.top) pt.y = mi.rcWork.top;
 
   // The popup class must exist: without this CreateWindowExW fails and every
@@ -1090,9 +1131,10 @@ static int popup_row_at(int y) {
   CField *fd = u ? find_field(g_popup_field) : nullptr;
   if (!u || !fd || !fd->items) return -1;
   int itemH = u->S_(30), padY = u->S_(8);
-  if (y < padY) return -1;
+  if (itemH <= 0 || y < padY) return -1;
   RECT rc = {0, 0, 0, 0};
   if (g_popup) GetClientRect(g_popup, &rc);
+  if (rc.bottom - padY * 2 < itemH) return -1;
   // Clicks past the last VISIBLE row are misses even if more rows exist
   // below the fold (they're reachable via wheel/keys, not blind clicks).
   int vis_rows = (rc.bottom - padY * 2) / itemH;
@@ -1535,6 +1577,11 @@ static void ui_reset_defaults(UI *u) {
   u->S.max_width = 0;
   u->S.max_height = 0;
   u->S.mic_device[0] = 0;
+  u->S.extra_audio_device[0] = 0;
+  u->S.capture_system_audio = 0;
+  u->S.system_audio_device[0] = 0;
+  u->S.mic_gain_pct = 100;
+  u->S.system_gain_pct = 100;
   u->S.clips_dir[0] = 0;
   wcsncpy_s(u->S.clip_name_pattern, KIRK_STR_LEN, L"clip-{timestamp}.mp4", _TRUNCATE);
   u->S.hotkey_clip_mod = 0; u->S.hotkey_clip_vk = 0x77;
@@ -1544,6 +1591,8 @@ static void ui_reset_defaults(UI *u) {
   u->presetSel = 2;
   u->resSel = 0;
   u->micSel = 0;
+  u->extraSel = 0;
+  u->sysDevSel = 0;
   u->fpsCustom = false; u->vbrCustom = false; u->abrCustom = false;
   for (auto &fd : u->f) {
     if (fd.type == FT_PRESET && fd.pval && fd.preset_vals) {
@@ -1628,9 +1677,38 @@ static void finish_dialog(UI *u, bool saved) {
     } // Custom (last) leaves S.max_* untouched.
     if (u->micSel <= 0) {
       u->S.mic_device[0] = 0;
+    } else if (u->micSel < (int)u->mic_items.size()) {
+      // mic_items[0] is "(System default)"; micSel is already a mic_items
+      // index (matched as dev_i -> micSel = i+1). The old code copied
+      // mic_items[micSel-1], shifting every choice down one row on save:
+      // the dialog showed N but saved N-1 (the "selects the item above"
+      // bug, most visible on the mic dropdown).
+      if (u->mic_items[(size_t)u->micSel] == L"(System default)") {
+        u->S.mic_device[0] = 0;
+      } else {
+        wcsncpy_s(u->S.mic_device, KIRK_STR_LEN, u->mic_items[(size_t)u->micSel].c_str(), _TRUNCATE);
+      }
     } else {
-      wcsncpy_s(u->S.mic_device, KIRK_STR_LEN, u->mic_items[u->micSel - 1].c_str(), _TRUNCATE);
+      u->S.mic_device[0] = 0;
     }
+    // Second mic: extra_items[0] is "(None)"; extraSel is a direct index.
+    if (u->extraSel <= 0 || u->extraSel >= (int)u->extra_items.size()) {
+      u->S.extra_audio_device[0] = 0;
+    } else if (u->extra_items[(size_t)u->extraSel] == L"(None)") {
+      u->S.extra_audio_device[0] = 0;
+    } else {
+      wcsncpy_s(u->S.extra_audio_device, KIRK_STR_LEN, u->extra_items[(size_t)u->extraSel].c_str(), _TRUNCATE);
+    }
+    // System loopback source: render_items[0] is "(Default output)".
+    if (u->sysDevSel <= 0 || u->sysDevSel >= (int)u->render_items.size()) {
+      u->S.system_audio_device[0] = 0;
+    } else if (u->render_items[(size_t)u->sysDevSel] == L"(Default output)") {
+      u->S.system_audio_device[0] = 0;
+    } else {
+      wcsncpy_s(u->S.system_audio_device, KIRK_STR_LEN, u->render_items[(size_t)u->sysDevSel].c_str(), _TRUNCATE);
+    }
+    if (u->S.mic_gain_pct < 0 || u->S.mic_gain_pct > 200) u->S.mic_gain_pct = 100;
+    if (u->S.system_gain_pct < 0 || u->S.system_gain_pct > 200) u->S.system_gain_pct = 100;
 
     if (!g_saved) g_saved = (kirk_settings *)calloc(1, sizeof(kirk_settings));
     if (g_saved) memcpy(g_saved, &u->S, sizeof(kirk_settings));
@@ -2500,7 +2578,11 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
   memcpy(&u->S, initial, sizeof(kirk_settings));
 
   u->mic_items.push_back(L"(System default)");
+  u->extra_items.push_back(L"(None)");
+  u->render_items.push_back(L"(Default output)");
   u->micSel = 0;
+  u->extraSel = 0;
+  u->sysDevSel = 0;
   {
     // WASAPI enumeration needs COM on this thread; init locally so the
     // dialog open path never depends on caller COM state.
@@ -2511,12 +2593,30 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
       for (uint32_t i = 0; i < devs.count; i++) {
         std::wstring name = devs.devices[i].name ? devs.devices[i].name : L"(unknown)";
         u->mic_items.push_back(name);
+        u->extra_items.push_back(name);
         if (devs.devices[i].name && u->S.mic_device[0] &&
             wcscmp(devs.devices[i].name, u->S.mic_device) == 0) {
           u->micSel = (int)i + 1;
         }
+        if (devs.devices[i].name && u->S.extra_audio_device[0] &&
+            wcscmp(devs.devices[i].name, u->S.extra_audio_device) == 0) {
+          u->extraSel = (int)i + 1;
+        }
       }
       kirk_audio_enum_free(&devs);
+    }
+    kirk_audio_device_list outs;
+    memset(&outs, 0, sizeof(outs));
+    if (kirk_audio_enum_render(&outs) == 0) {
+      for (uint32_t i = 0; i < outs.count; i++) {
+        std::wstring name = outs.devices[i].name ? outs.devices[i].name : L"(unknown)";
+        u->render_items.push_back(name);
+        if (outs.devices[i].name && u->S.system_audio_device[0] &&
+            wcscmp(outs.devices[i].name, u->S.system_audio_device) == 0) {
+          u->sysDevSel = (int)i + 1;
+        }
+      }
+      kirk_audio_enum_free(&outs);
     }
     if (SUCCEEDED(cok)) CoUninitialize();
   }

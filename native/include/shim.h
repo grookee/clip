@@ -32,6 +32,10 @@ typedef struct {
 /// Caller must free the list with kirk_audio_enum_free.
 KIRK_SHIM_API int kirk_audio_enum_capture(kirk_audio_device_list *out);
 
+/// Enumerates WASAPI render (output) devices: speakers / headphones / HDMI.
+/// Same ownership as capture; used for the system-audio loopback picker.
+KIRK_SHIM_API int kirk_audio_enum_render(kirk_audio_device_list *out);
+
 /// Frees a device list from kirk_audio_enum_capture.
 KIRK_SHIM_API void kirk_audio_enum_free(kirk_audio_device_list *list);
 
@@ -115,6 +119,12 @@ typedef struct {
   wchar_t  encoder_preset[64];            /* p1..p7 / speed|balanced|quality / x264 names; "" = p4 */
   uint32_t max_width;                     /* 0 = native; otherwise downscale cap */
   uint32_t max_height;                    /* 0 = native; otherwise downscale cap */
+  /* Mini mixer (appended; keep existing order stable for FFI). */
+  wchar_t  extra_audio_device[KIRK_STR_LEN]; /* 2nd dshow capture; "" = none (full list via config file) */
+  int32_t  capture_system_audio;          /* WASAPI loopback: game / Discord / system output */
+  wchar_t  system_audio_device[KIRK_STR_LEN]; /* render endpoint; "" = default output */
+  int32_t  mic_gain_pct;                  /* 0..200, 100 = unity */
+  int32_t  system_gain_pct;               /* 0..200, 100 = unity */
 } kirk_settings;
 
 /// Opens the settings dialog. Blocking modal loop; returns 1 on success.

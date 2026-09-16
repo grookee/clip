@@ -22,8 +22,18 @@ module Kirk
     property hw_encoder : String = ""
 
     property capture_audio : Bool = true
-    property mic_device : String = "" # empty = ffmpeg dshow default
+    property mic_device : String = "" # empty = system default mic (wasapi default)
     property audio_bitrate_kbps : Int32 = 192
+
+    # Mini audio mixer: one primary mic + optional extra capture devices +
+    # optional system-output loopback (game / Discord), mixed into a single
+    # AAC track. Empty extra list / empty system device = off / default.
+    # Gains are linear multipliers (1.0 = unity), clamped to 0.0..2.0.
+    property extra_audio_devices : Array(String) = [] of String
+    property capture_system_audio : Bool = false
+    property system_audio_device : String = ""
+    property mic_gain : Float64 = 1.0
+    property system_gain : Float64 = 1.0
 
     # ";"-separated: phrases themselves contain commas, so "," fragments
     # every command into unmatchable pieces (silent voice-trigger failure).
@@ -86,6 +96,32 @@ module Kirk
         slow slower veryslow]
       self.encoder_preset = "p4" unless allowed_presets.includes?(encoder_preset.strip.downcase)
       self.clip_name_pattern = "clip-{timestamp}.mp4" if clip_name_pattern.strip.empty?
+      # Heal configs written by the pre-fix settings dialog, which saved the
+      # literal "(System default)" label instead of "" (off-by-one in the
+      # native save path). Both mean "default mic".
+      if mic_device.strip == "(System default)"
+        self.mic_device = ""
+      else
+        self.mic_device = mic_device.strip
+      end
+      self.system_audio_device = system_audio_device.strip
+      # Extra devices: strip, drop empties/duplicates and the primary mic,
+      # cap the list so one bad edit can't spawn dozens of ffmpeg inputs.
+      seen = Hash(String, Bool).new
+      seen[mic_device.downcase] = true unless mic_device.empty?
+      clean = [] of String
+      extra_audio_devices.each do |d|
+        name = d.strip
+        next if name.empty? || name == "(System default)" || name == "(None)"
+        key = name.downcase
+        next if seen[key]?
+        seen[key] = true
+        clean << name
+        break if clean.size >= 4
+      end
+      self.extra_audio_devices = clean
+      self.mic_gain = 1.0 if mic_gain < 0.0 || mic_gain > 2.0
+      self.system_gain = 1.0 if system_gain < 0.0 || system_gain > 2.0
       # The stale 0.60 default never fires where SAPI decodes at 0.017-0.041;
       # migrate exactly that value, leave explicit user values untouched.
       if voice_confidence == 0.60
@@ -126,6 +162,10 @@ module Kirk
         return Settings.from_yaml(File.read(path)).sanitize!
       rescue ex
         Log.warn { "config parse error: #{ex.message}; using defaults" }
+        begin
+          File.copy(path, "#{path}.bad-#{Time.local.to_s("%Y%m%d-%H%M%S")}")
+        rescue
+        end
         return Settings.new
       end
     end
@@ -133,7 +173,18 @@ module Kirk
     def save(path : String)
       dir = File.dirname(path)
       Dir.mkdir_p(dir) unless Dir.exists?(dir)
-      File.write(path, to_yaml)
+      # Atomic write: a crash/power cut mid-write used to leave a truncated
+      # kirk.yml behind, and the next launch silently fell back to defaults
+      # ("config is janky"). Write-temp + rename keeps the old file intact.
+      tmp = "#{path}.tmp-#{Process.pid}"
+      File.write(tmp, to_yaml)
+      File.rename(tmp, path)
+    rescue ex
+      Log.warn { "config: save failed: #{ex.message}" }
+      begin
+        File.delete(tmp) if tmp && File.exists?(tmp)
+      rescue
+      end
     end
   end
 end

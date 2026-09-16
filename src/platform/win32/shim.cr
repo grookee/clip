@@ -20,6 +20,7 @@ lib LibShim
 
   # WASAPI
   fun kirk_audio_enum_capture(list : AudioDeviceList*) : LibC::Int
+  fun kirk_audio_enum_render(list : AudioDeviceList*) : LibC::Int
   fun kirk_audio_enum_free(list : AudioDeviceList*)
   fun kirk_audio_get_default_capture_id : WChar*
 
@@ -55,8 +56,17 @@ end
 
 # Enumerates active WASAPI capture endpoints as UTF-8 strings.
 def win32_list_microphones : Array(MicDevice)
+  win32_list_audio_endpoints(->LibShim.kirk_audio_enum_capture(LibShim::AudioDeviceList*))
+end
+
+# Enumerates active WASAPI render (output) endpoints: speakers / headphones.
+def win32_list_speakers : Array(MicDevice)
+  win32_list_audio_endpoints(->LibShim.kirk_audio_enum_render(LibShim::AudioDeviceList*))
+end
+
+private def win32_list_audio_endpoints(fn : LibShim::AudioDeviceList* -> LibC::Int) : Array(MicDevice)
   list = LibShim::AudioDeviceList.new
-  return [] of MicDevice if LibShim.kirk_audio_enum_capture(pointerof(list)) != 0
+  return [] of MicDevice if fn.call(pointerof(list)) != 0
 
   mics = [] of MicDevice
   n = list.count
@@ -103,6 +113,12 @@ struct KirkSettings
   property encoder_preset : StaticArray(UInt16, 64) = StaticArray(UInt16, 64).new(0_u16)
   property max_width : UInt32 = 0_u32
   property max_height : UInt32 = 0_u32
+  # Mini mixer (must match kirk_settings tail order in native/include/shim.h).
+  property extra_audio_device : StaticArray(UInt16, 260) = StaticArray(UInt16, 260).new(0_u16)
+  property capture_system_audio : LibC::Int = 0
+  property system_audio_device : StaticArray(UInt16, 260) = StaticArray(UInt16, 260).new(0_u16)
+  property mic_gain_pct : Int32 = 100
+  property system_gain_pct : Int32 = 100
 end
 
 class VoiceSession
@@ -236,8 +252,20 @@ def win32_default_capture_name : String
 end
 
 def win32_resolve_recording_mic_label(mic_device : String) : String
-  return "(System default) -> #{win32_default_capture_name} [NO mic audio: empty device adds no dshow input]" if mic_device.strip.empty?
+  return "(System default) -> #{win32_default_capture_name}" if mic_device.strip.empty? || mic_device.strip == "(System default)"
   mic_device
+end
+
+def win32_describe_audio_sources(cfg : Kirk::Settings) : String
+  parts = [] of String
+  parts << "mic=#{win32_resolve_recording_mic_label(cfg.mic_device)} x#{"%.2f" % cfg.mic_gain}"
+  cfg.extra_audio_devices.each { |d| parts << "extra=#{d}" }
+  if cfg.capture_system_audio
+    sys = cfg.system_audio_device.strip
+    sys = "(default output)" if sys.empty?
+    parts << "system=#{sys} x#{"%.2f" % cfg.system_gain}"
+  end
+  parts.join(", ")
 end
 
 # A NULL return means no input could be bound (silent engine): the native side

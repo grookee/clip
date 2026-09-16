@@ -63,8 +63,13 @@ the main knobs:
 | `encoder_preset`     | quality/speed: `p1`..`p7`, `speed`/`balanced`/`quality`, or x264 names |
 | `max_width`          | downscale cap, `0` = native (e.g. `1920`) |
 | `max_height`         | downscale cap, `0` = native (e.g. `1080`) |
-| `capture_audio`      | bake mic audio into clips                |
-| `mic_device`         | dshow mic, `""` = none                   |
+| `capture_audio`      | master switch for clip audio (mics + system) |
+| `mic_device`         | primary mic, `""` = system default mic       |
+| `extra_audio_devices`| extra mics mixed in (list, e.g. `["Yeti"]`)  |
+| `capture_system_audio` | loop back game/discord output into clips   |
+| `system_audio_device`| loopback source, `""` = default output       |
+| `mic_gain`           | mic loudness, `1.0` = unity (0..2)           |
+| `system_gain`        | system-audio loudness, `1.0` = unity (0..2)  |
 | `voice_enabled`      | voice commands on/off                    |
 | `voice_command`      | `;`-separated trigger phrases            |
 | `hotkey_clip_vk`     | clip hotkey (`0x77` = f8)                |

@@ -142,7 +142,7 @@ module Kirk
 
       # Voice binds its own SAPI input; capture_audio only affects ffmpeg audio.
       Log.info { "audio: WASAPI default capture = #{win32_default_capture_name}" }
-      Log.info { "audio: recording mic setting = #{win32_resolve_recording_mic_label(@cfg.mic_device)} (capture_audio=#{@cfg.capture_audio})" }
+      Log.info { "audio: sources = #{win32_describe_audio_sources(@cfg)} (capture_audio=#{@cfg.capture_audio})" }
 
       @voice = Voice.new(@dirs[:logs], @cfg.voice_enabled)
       @voice.not_nil!.apply_settings(@cfg)
@@ -327,7 +327,7 @@ module Kirk
           Log.info { "capture: stopped" }
           show_balloon("Recording stopped", "kirk stopped recording.")
         else
-          Log.info { "capture: starting (recording mic=#{win32_resolve_recording_mic_label(@cfg.mic_device)}, capture_audio=#{@cfg.capture_audio})" }
+          Log.info { "capture: starting (#{win32_describe_audio_sources(@cfg)}, capture_audio=#{@cfg.capture_audio})" }
           log_voice_liveness("capture start")
           e.start_capture
           show_balloon("Recording started", "kirk is now recording.")
@@ -551,6 +551,11 @@ module Kirk
                       old.segment_seconds != @cfg.segment_seconds ||
                       old.capture_audio != @cfg.capture_audio ||
                       old.mic_device != @cfg.mic_device ||
+                      old.extra_audio_devices != @cfg.extra_audio_devices ||
+                      old.capture_system_audio != @cfg.capture_system_audio ||
+                      old.system_audio_device != @cfg.system_audio_device ||
+                      old.mic_gain != @cfg.mic_gain ||
+                      old.system_gain != @cfg.system_gain ||
                       old.hw_encoder != @cfg.hw_encoder ||
                       old.encoder_preset != @cfg.encoder_preset ||
                       old.max_width != @cfg.max_width ||
@@ -584,7 +589,7 @@ module Kirk
         restart_voice
       end
       Log.info { "audio: WASAPI default capture = #{win32_default_capture_name}" }
-      Log.info { "audio: recording mic setting = #{win32_resolve_recording_mic_label(@cfg.mic_device)} (capture_audio=#{@cfg.capture_audio})" }
+      Log.info { "audio: sources = #{win32_describe_audio_sources(@cfg)} (capture_audio=#{@cfg.capture_audio})" }
 
       if old.verbose_logging != @cfg.verbose_logging
         setup_logging

@@ -2,7 +2,7 @@
 
 #include "../include/shim.h"
 
-int kirk_audio_enum_capture(kirk_audio_device_list *out) {
+static int kirk_audio_enum_endpoints(int render, kirk_audio_device_list *out) {
   if (!out) return -1;
   out->devices = NULL;
   out->count   = 0;
@@ -15,7 +15,7 @@ int kirk_audio_enum_capture(kirk_audio_device_list *out) {
 
   IMMDeviceCollection *pcoll = NULL;
   hr = IMMDeviceEnumerator_EnumAudioEndpoints(
-    penum, eCapture, DEVICE_STATE_ACTIVE, &pcoll);
+    penum, render ? eRender : eCapture, DEVICE_STATE_ACTIVE, &pcoll);
   if (FAILED(hr) || !pcoll) { IMMDeviceEnumerator_Release(penum); return -1; }
 
   UINT n = 0;
@@ -65,6 +65,14 @@ int kirk_audio_enum_capture(kirk_audio_device_list *out) {
   IMMDeviceCollection_Release(pcoll);
   IMMDeviceEnumerator_Release(penum);
   return 0;
+}
+
+int kirk_audio_enum_capture(kirk_audio_device_list *out) {
+  return kirk_audio_enum_endpoints(0, out);
+}
+
+int kirk_audio_enum_render(kirk_audio_device_list *out) {
+  return kirk_audio_enum_endpoints(1, out);
 }
 
 void kirk_audio_enum_free(kirk_audio_device_list *list) {

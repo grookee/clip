@@ -22,6 +22,11 @@ module Kirk
     @capture_audio = true
     @mic_device = ""
     @audio_bitrate_kbps = 128_i32
+    @extra_audio_devices = [] of String
+    @capture_system_audio = false
+    @system_audio_device = ""
+    @mic_gain = 1.0_f64
+    @system_gain = 1.0_f64
 
     @proc : Process?
     @err_io : File?
@@ -61,6 +66,11 @@ module Kirk
       @capture_audio = cfg.capture_audio
       @mic_device = cfg.mic_device
       @audio_bitrate_kbps = cfg.audio_bitrate_kbps
+      @extra_audio_devices = cfg.extra_audio_devices.dup
+      @capture_system_audio = cfg.capture_system_audio
+      @system_audio_device = cfg.system_audio_device
+      @mic_gain = cfg.mic_gain
+      @system_gain = cfg.system_gain
       @resolved_encoder = nil
       @gpu_family.clear
       @gpu_probed_at.clear
@@ -397,22 +407,71 @@ module Kirk
       args
     end
 
-    # Audio-only rolling capture. Runs as its own process so the dshow
-    # device clock can never stall the video vsync stage (see above).
+    # Audio-only rolling capture. Runs as its own process so an audio device
+    # clock can never stall the video vsync stage (see capture_args note).
     # Cuts on the same segment cadence so clip saves can tail-align the
     # two segment lists.
+    #
+    # Mini mixer: primary mic + up to N extra dshow devices + optional
+    # WASAPI loopback (game / Discord / system output), mixed with amix
+    # into ONE aac stream so the remux path below is unchanged. An empty
+    # mic_device means the system default mic (wasapi `default`), NOT
+    # silence — the old code returned nil here, so "Recording mic:
+    # (System default)" + capture ON recorded no audio at all.
+    private def dshow_audio_input(name : String) : Array(String)
+      # dshow parses audio=<name>; a stray double-quote in a friendly name
+      # breaks the device match, so normalize it away. The whole token is
+      # one argv element, so spaces need no quoting.
+      safe = name.gsub('"', '\'')
+      ["-thread_queue_size", "1024", "-f", "dshow", "-rtbufsize", "256M",
+       "-i", "audio=#{safe}"]
+    end
+
     private def audio_args : Array(String)?
       return nil unless @capture_audio
-      device = @mic_device
-      return nil unless device && !device.empty?
       seg = @segment_seconds.not_nil!
+
+      # Collect inputs: {kind_args, gain}. Order is stable: mic, extras, loopback.
+      inputs = [] of {Array(String), Float64}
+      mic = @mic_device
+      if mic && !mic.strip.empty?
+        inputs << {dshow_audio_input(mic.strip), @mic_gain}
+      else
+        inputs << {["-thread_queue_size", "1024", "-f", "wasapi", "-i", "default"], @mic_gain}
+      end
+      @extra_audio_devices.each do |d|
+        name = d.strip
+        next if name.empty?
+        next if mic && !mic.strip.empty? && name.downcase == mic.strip.downcase
+        inputs << {dshow_audio_input(name), 1.0}
+      end
+      if @capture_system_audio
+        dev = @system_audio_device.strip
+        dev = "default" if dev.empty?
+        inputs << {["-thread_queue_size", "1024", "-f", "wasapi", "-loopback", "1", "-i", dev], @system_gain}
+      end
+      return nil if inputs.empty?
 
       args = Array(String).new
       args << "-hide_banner" << "-loglevel" << "warning" << "-stats" << "-y"
-      # Buffered dshow input: without these a busy game thread starves
-      # the mic reader and ffmpeg aborts with "real-time buffer full".
-      args << "-thread_queue_size" << "1024" << "-f" << "dshow" << "-rtbufsize" << "256M" << "-i" << "audio=#{device}"
-      args << "-c:a" << "aac" << "-b:a" << "#{@audio_bitrate_kbps}k" << "-ar" << "44100" << "-ac" << "2"
+      inputs.each { |in_args, _| in_args.each { |a| args << a } }
+
+      if inputs.size == 1
+        args << "-c:a" << "aac" << "-b:a" << "#{@audio_bitrate_kbps}k" << "-ar" << "44100" << "-ac" << "2"
+      else
+        # Normalize per-input (devices disagree on rate/layout) then apply
+        # the mixer gain, then mix down to one stereo stream.
+        parts = Array(String).new
+        inputs.each_with_index do |(_, gain), i|
+          g = gain.clamp(0.0, 2.0)
+          parts << "[#{i}:a]aresample=44100,aformat=channel_layouts=stereo,volume=#{"%.3f" % g}[a#{i}]"
+        end
+        mix = inputs.each_index.map { |i| "[a#{i}]" }.join("")
+        parts << "#{mix}amix=inputs=#{inputs.size}:duration=longest:dropout_transition=0:normalize=0[a]"
+        args << "-filter_complex" << parts.join(";")
+        args << "-map" << "[a]"
+        args << "-c:a" << "aac" << "-b:a" << "#{@audio_bitrate_kbps}k" << "-ar" << "44100" << "-ac" << "2"
+      end
       args << "-f" << "segment"
       args << "-segment_time" << seg.to_s
       args << "-reset_timestamps" << "1"

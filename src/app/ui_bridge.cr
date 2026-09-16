@@ -47,6 +47,11 @@ module Kirk::UIBridge
     c.max_width = s.max_width.to_u32
     c.max_height = s.max_height.to_u32
     copy_wchars(c.mic_device.to_unsafe, 260, s.mic_device)
+    copy_wchars(c.extra_audio_device.to_unsafe, 260, s.extra_audio_devices.first? || "")
+    c.capture_system_audio = s.capture_system_audio ? 1 : 0
+    copy_wchars(c.system_audio_device.to_unsafe, 260, s.system_audio_device)
+    c.mic_gain_pct = (s.mic_gain.clamp(0.0, 2.0) * 100).round.to_i32
+    c.system_gain_pct = (s.system_gain.clamp(0.0, 2.0) * 100).round.to_i32
     copy_wchars(c.clips_dir.to_unsafe, 520, s.clips_dir)
     copy_wchars(c.clip_name_pattern.to_unsafe, 260, s.clip_name_pattern)
     cc.value = c
@@ -81,6 +86,24 @@ module Kirk::UIBridge
     mh = cc.max_height.to_i32
     t.max_height = (mh == 0 || (mh >= 360 && mh <= 4320)) ? (mh // 2 * 2) : 0
     t.mic_device = read_wchars(cc.mic_device)
+    t.mic_device = "" if t.mic_device.strip == "(System default)"
+    # Dialog edits the first extra device; the full list stays hand-editable
+    # in kirk.yml. Preserve entries beyond the first across dialog saves.
+    extra_first = read_wchars(cc.extra_audio_device).strip
+    extra_first = "" if extra_first == "(None)" || extra_first == "(System default)"
+    rest = t.extra_audio_devices.reject(&.strip.empty?)
+    if extra_first.empty?
+      t.extra_audio_devices = rest.size > 1 ? rest[1..] : [] of String
+    else
+      t.extra_audio_devices = [extra_first] + (rest.size > 1 ? rest[1..] : [] of String)
+    end
+    t.capture_system_audio = cc.capture_system_audio != 0
+    t.system_audio_device = read_wchars(cc.system_audio_device)
+    t.system_audio_device = "" if t.system_audio_device.strip == "(Default output)"
+    mg = cc.mic_gain_pct
+    t.mic_gain = (mg >= 0 && mg <= 200) ? mg.to_f64 / 100.0 : 1.0
+    sg = cc.system_gain_pct
+    t.system_gain = (sg >= 0 && sg <= 200) ? sg.to_f64 / 100.0 : 1.0
     t.clips_dir = read_wchars(cc.clips_dir)
     pat = read_wchars(cc.clip_name_pattern)
     t.clip_name_pattern = pat.strip.empty? ? "clip-{timestamp}.mp4" : pat

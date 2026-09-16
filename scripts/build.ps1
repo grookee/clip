@@ -84,8 +84,20 @@ if (Test-Path $ffExe) {
     Where-Object { $_.FullName -match "Hostx64\\x64" } |
     Sort-Object FullName -Descending | Select-Object -First 1
   if ($editbin) {
-    & $editbin.FullName /SUBSYSTEM:WINDOWS $ffExe | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "editbin failed" }
+    # Capture editbin output: a bare "editbin failed" hides the reason, which
+    # is almost always a locked ffmpeg.exe (kirk capture still running from a
+    # previous dev session - Windows locks running images for writes).
+    $ebOut = & $editbin.FullName /SUBSYSTEM:WINDOWS $ffExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      $lockers = @(Get-Process ffmpeg -ErrorAction SilentlyContinue | ForEach-Object {
+        try { if ($_.Path -ieq $ffExe) { $_.Id } } catch { }
+      })
+      if ($lockers.Count -gt 0) {
+        throw ("editbin failed (exit $LASTEXITCODE): $ffExe is locked by running ffmpeg PID(s) " +
+          "$($lockers -join ', ') (kirk capture still running?). Stop kirk / kill them, then re-run this script.`n$ebOut")
+      }
+      throw "editbin failed (exit $LASTEXITCODE).`n$ebOut"
+    }
     Write-Host "Headless ffmpeg: $($editbin.FullName)"
   } else {
     Write-Warning "editbin.exe not found - ffmpeg will keep popping console windows."
