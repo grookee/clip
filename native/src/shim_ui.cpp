@@ -41,20 +41,20 @@
 #define ACCENT_ENABLE_ACRYLICBLURBEHIND 4
 #define WCA_ACCENT_POLICY               19
 
-static const COLORREF GV_BG0  = RGB(0x28, 0x28, 0x28);  // #282828
-static const COLORREF GV_BG0H = RGB(0x1d, 0x20, 0x21);  // #1d2021
-static const COLORREF GV_BG1  = RGB(0x3c, 0x38, 0x36);  // #3c3836
-static const COLORREF GV_BG2  = RGB(0x50, 0x49, 0x45);  // #504945
-static const COLORREF GV_BG3  = RGB(0x66, 0x5c, 0x54);  // #665c54
-static const COLORREF GV_FG0  = RGB(0xfb, 0xf1, 0xc7);  // #fbf1c7
-static const COLORREF GV_FG1  = RGB(0xeb, 0xdb, 0xb2);  // #ebdbb2
-static const COLORREF GV_FG2  = RGB(0xd5, 0xc4, 0xa1);  // #d5c4a1
-static const COLORREF GV_GRAY = RGB(0x92, 0x83, 0x74);  // #928374
-static const COLORREF GV_BLUE = RGB(0x83, 0xa5, 0x98);  // #83a598
-static const COLORREF GV_ORG  = RGB(0xfe, 0x80, 0x19);  // #fe8019
-static const COLORREF GV_RED  = RGB(0xfb, 0x49, 0x34);  // #fb4934
+static const COLORREF GV_BG0  = RGB(0x28, 0x28, 0x28);
+static const COLORREF GV_BG0H = RGB(0x1d, 0x20, 0x21);
+static const COLORREF GV_BG1  = RGB(0x3c, 0x38, 0x36);
+static const COLORREF GV_BG2  = RGB(0x50, 0x49, 0x45);
+static const COLORREF GV_BG3  = RGB(0x66, 0x5c, 0x54);
+static const COLORREF GV_FG0  = RGB(0xfb, 0xf1, 0xc7);
+static const COLORREF GV_FG1  = RGB(0xeb, 0xdb, 0xb2);
+static const COLORREF GV_FG2  = RGB(0xd5, 0xc4, 0xa1);
+static const COLORREF GV_GRAY = RGB(0x92, 0x83, 0x74);
+static const COLORREF GV_BLUE = RGB(0x83, 0xa5, 0x98);
+static const COLORREF GV_ORG  = RGB(0xfe, 0x80, 0x19);
+static const COLORREF GV_RED  = RGB(0xfb, 0x49, 0x34);
 
-static const COLORREF GV_GREEN = RGB(0x9d, 0xb1, 0x7a);  // #9db17a (gruvbox best green)
+static const COLORREF GV_GREEN = RGB(0x9d, 0xb1, 0x7a);  // gruvbox best green
 
 static COLORREF gv_blend(COLORREF a, COLORREF b, float t) {
   int ar = GetRValue(a), ag = GetGValue(a), ab = GetBValue(a);
@@ -1691,11 +1691,9 @@ static void ui_reset_defaults(UI *u) {
   u->fpsCustom = false; u->vbrCustom = false; u->abrCustom = false;
   for (auto &fd : u->f) {
     if (fd.type == FT_PRESET && fd.pval && fd.preset_vals) {
-      int cur = *fd.pval;
       if (fd.id == 1) { fd.custom = false; }
       else if (fd.id == 2) { fd.custom = false; }
       else if (fd.id == 5) { fd.custom = false; }
-      (void)cur;
     }
     if (fd.type == FT_HOTKEY) {
       fd.cap_dirty = false;
@@ -1748,8 +1746,7 @@ static void browse_folder() {
 
 static void finish_dialog(UI *u, bool saved) {
   tip_hide();
-  if (!saved) {
-  } else {
+  if (saved) {
     for (auto &fd : u->f) {
       if (fd.type == FT_EDIT && fd.edit) {
         GetWindowTextW(fd.edit, fd.editbuf, fd.editmax);
@@ -2073,7 +2070,6 @@ static void ui_paint(UI *u, HDC dc, RECT client) {
   draw_text(dc, L"Cancel", &u->rcCancel, GV_FG1, u->fBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   ui_fill_round(dc, &u->rcSave, u->brOrg, u->R_ctrl());
   draw_text(dc, L"Save", &u->rcSave, GV_BG0H, u->fBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-  // Build stamp in the bottom margin strip, right-aligned under the buttons.
   wchar_t ver[96];
   swprintf_s(ver, 96, L"v%s \u00B7 %s", KIRK_VERSION, KIRK_COMMIT);
   RECT vr = {u->rcReset.right + u->S_(12), u->clientH - u->S_(17),
@@ -2140,7 +2136,6 @@ static void ui_make_fonts(UI *u) {
 static void ui_move_focus(UI *u, int dir) {
   int n = (int)u->f.size();
   if (n == 0) return;
-  // collect focusable fields
   int cur = u->focus;
   int i = 0;
   if (cur < 0) i = dir > 0 ? 0 : n - 1;
@@ -2208,9 +2203,7 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_GETMINMAXINFO: {
       MINMAXINFO *mmi = (MINMAXINFO *)l;
       RECT f = {0, 0, u->S_(610), u->S_(460)};
-      DWORD style = (DWORD)GetWindowLongPtrW(h, GWL_STYLE);
       AdjustWindowRectEx(&f, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
-      (void)style;
       mmi->ptMinTrackSize.x = f.right - f.left;
       mmi->ptMinTrackSize.y = f.bottom - f.top;
       return 0;
@@ -2379,7 +2372,6 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_MOUSEMOVE: {
       POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
-      // Thumb drag: map mouse Y back to scroll offset.
       if (u->sbDragging && u->scroll_max > 0) {
         int trackH = u->rcTrack.bottom - u->rcTrack.top;
         int thumbH = u->rcThumb.bottom - u->rcThumb.top;
@@ -2419,14 +2411,12 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
       HitSub sub;
       int idx = hit_row(cpt, &sub);
-      bool changed = false;
       for (size_t i = 0; i < g_ui->f.size(); i++) {
         CField &fd = g_ui->f[i];
         bool hov = (int)i == idx;
         if (fd.hover != hov || (hov && fd.sub != sub)) {
           fd.hover = hov;
           fd.sub = hov ? sub : HS_NONE;
-          changed = true;
           ui_invalidate_field(u, fd);
         }
       }
@@ -2459,7 +2449,6 @@ static LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
         tme.hwndTrack = h;
         if (TrackMouseEvent(&tme)) u->mouse_tracked = true;
       }
-      (void)changed;
       return 0;
     }
     case WM_MOUSELEAVE: {

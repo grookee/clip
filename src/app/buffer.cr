@@ -11,10 +11,6 @@ module Kirk
       FileUtils.mkdir_p(@dir)
     end
 
-    def capacity=(v : Int32)
-      @capacity = v
-    end
-
     def segments : Array(String)
       # Dir.glob mishandles Windows backslashes; always glob with forward slashes.
       Dir.glob(File.join(@dir, "seg_*.ts").gsub('\\', '/')).sort

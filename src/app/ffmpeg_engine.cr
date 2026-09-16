@@ -76,10 +76,6 @@ module Kirk
       @gpu_probed_at.clear
     end
 
-    def cycle_segments : Int32
-      (@replay_seconds.not_nil! // @segment_seconds.not_nil!) + 2
-    end
-
     # Empty hw_encoder means auto: nvenc > amf > qsv > libx264, probed once
     # and cached. The probe test-encodes: listing an encoder in -encoders
     # only means the binary supports it (this AMD box lists h264_nvenc but

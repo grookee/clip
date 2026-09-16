@@ -18,7 +18,6 @@ lib LibShim
     count : UInt32
   end
 
-  # WASAPI
   fun kirk_audio_enum_capture(list : AudioDeviceList*) : LibC::Int
   fun kirk_audio_enum_render(list : AudioDeviceList*) : LibC::Int
   fun kirk_audio_enum_free(list : AudioDeviceList*)

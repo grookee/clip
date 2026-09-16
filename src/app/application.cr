@@ -37,7 +37,6 @@ module Kirk
     @settings_path : String
     @log_io : IO?
     @log_backend : Log::IOBackend?
-    @recording = false
     @first_run = false
     @settings_open = false
     @voice_polls = 0_i64
