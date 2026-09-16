@@ -209,7 +209,7 @@ int kirk_voice_load_grammar(kirk_voice_handle h, const wchar_t *srgs_path) {
   ISpRecoGrammar *grammar = NULL;
   HRESULT hr = h->ctx->CreateGrammar(0, &grammar);
   if (FAILED(hr) || !grammar) { g_voice_last_hr = hr; return -1; }
-  hr = grammar->LoadCmdFromFile(srgs_path, SPLO_STATIC);
+  hr = grammar->LoadCmdFromFile(srgs_path, SPLO_DYNAMIC);
   if (FAILED(hr)) { g_voice_last_hr = hr; grammar->Release(); return -1; }
   h->grammar = grammar;
   g_voice_last_hr = S_OK;
