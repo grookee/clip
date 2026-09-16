@@ -16,6 +16,7 @@ no cloud, no telemetry.
 - `f9` toggles recording, `f10` takes a screenshot
 - hardware encoding when available (nvenc > amf > qsv), x264 fallback
 - system tray with a native settings dialog
+- clip-saved feedback: windows notification, chime, both, or silent
 - storage cap with oldest-first auto-delete
 - clips, config, and logs all live under `%localappdata%\kirk`
 
@@ -75,6 +76,8 @@ the main knobs:
 | `hotkey_clip_vk`     | clip hotkey (`0x77` = f8)                |
 | `storage_limit_gb`   | max clip folder size                     |
 | `clips_dir`          | `""` = default clips folder              |
+| `show_save_notifications` | windows notification on clip save   |
+| `play_save_sound`  | chime (`clip.wav`) on clip save            |
 | `verbose_logging`    | extra local logging                      |
 
 ## project structure

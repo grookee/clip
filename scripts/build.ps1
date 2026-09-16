@@ -69,6 +69,17 @@ if ($vendorBin -and (-not (Test-Path (Join-Path $BuildDir "ffmpeg.exe")))) {
   Write-Host "Staged vendor ffmpeg into $BuildDir"
 }
 
+# 3b. Stage the clip-saved chime next to kirk.exe (exe-dir lookup) when
+#     present in the repo. Missing file = silent feedback, never a failure.
+$chimeSrc = Join-Path $Root "assets\clip.wav"
+$chimeDst = Join-Path $BuildDir "clip.wav"
+if (Test-Path $chimeSrc) {
+  Copy-Item $chimeSrc $chimeDst -Force
+  Write-Host "Staged clip chime into $BuildDir"
+} else {
+  Write-Warning "No $chimeSrc - clip-save sound will be silent."
+}
+
 # 4. Headless ffmpeg: flip build\ffmpeg.exe from CONSOLE to WINDOWS subsystem
 #    (editbin) so clip work never allocates a console window. Crystal's
 #    Process passes no CREATE_NO_WINDOW, so every console-subsystem child

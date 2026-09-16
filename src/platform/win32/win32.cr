@@ -382,6 +382,58 @@ module Win32
     User32.DestroyMenu(menu) != 0
   end
 
+  @[Link("winmm")]
+  lib WinMM
+    fun PlaySoundW(sound : WCHAR*, mod : HANDLE, flags : DWORD) : BOOL
+  end
+
+  SND_ASYNC     = 0x0001_u32
+  SND_NODEFAULT = 0x0002_u32
+  SND_FILENAME  = 0x00020000_u32
+
+  # Fire-and-forget chime for clip saves. Best-effort: a missing file just
+  # means silence, never an exception on the caller.
+  def self.play_sound_file(path : String) : Bool
+    return false if path.strip.empty?
+    return false unless File.exists?(path)
+    WinMM.PlaySoundW(to_wstr(path), Pointer(Void).null, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != 0
+  rescue
+    false
+  end
+
+  # Locates the bundled clip chime. Prefers the exe directory (installed /
+  # staged layout), then the repo/dev layout, then %LOCALAPPDATA%\kirk.
+  def self.clip_sound_path : String?
+    ["clip.wav", "assets/clip.wav"].each do |rel|
+      begin
+        exe = executable_path
+        unless exe.empty?
+          p = File.join(File.dirname(exe), rel)
+          return p if File.exists?(p)
+        end
+      rescue
+      end
+      return rel if File.exists?(rel)
+    end
+    begin
+      local = ENV["LOCALAPPDATA"]? || ENV["USERPROFILE"]?
+      if local
+        p = File.join(local, "kirk", "clip.wav")
+        return p if File.exists?(p)
+      end
+    rescue
+    end
+    nil
+  end
+
+  def self.play_clip_sound : Bool
+    if p = clip_sound_path
+      play_sound_file(p)
+    else
+      false
+    end
+  end
+
   @[Link("gdi32")]
   lib Gdi32
     fun CreateCompatibleDC(hdc : Void*) : Void*

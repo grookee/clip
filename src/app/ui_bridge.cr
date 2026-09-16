@@ -32,6 +32,7 @@ module Kirk::UIBridge
     c.run_at_startup = s.run_at_startup ? 1 : 0
     c.start_minimized = s.start_minimized ? 1 : 0
     c.show_save_notifications = s.show_save_notifications ? 1 : 0
+    c.play_save_sound = s.play_save_sound ? 1 : 0
     c.voice_enabled = s.voice_enabled ? 1 : 0
     c.auto_start_recording = s.auto_start_recording ? 1 : 0
     c.hotkey_clip_mod = s.hotkey_clip_mod
@@ -76,6 +77,7 @@ module Kirk::UIBridge
     t.run_at_startup = cc.run_at_startup != 0
     t.start_minimized = cc.start_minimized != 0
     t.show_save_notifications = cc.show_save_notifications != 0
+    t.play_save_sound = cc.play_save_sound != 0
     t.voice_enabled = cc.voice_enabled != 0
     t.auto_start_recording = cc.auto_start_recording != 0
     t.hw_encoder = read_wchars(cc.encoder)

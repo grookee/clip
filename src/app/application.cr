@@ -464,10 +464,22 @@ module Kirk
       end
     end
 
+    # Central user feedback: Windows tray notification and/or the bundled
+    # chime, per the "Clip saved feedback" setting (both / toast / sound /
+    # off). Best-effort and exception-free: sound failures only log.
     private def show_balloon(title : String, message : String)
-      if tray = @tray
-        tray.balloon(title, message)
+      if @cfg.show_save_notifications
+        if tray = @tray
+          tray.balloon(title, message)
+        end
       end
+      if @cfg.play_save_sound
+        unless Win32.play_clip_sound
+          Log.debug { "feedback: chime unavailable (#{Win32.clip_sound_path.inspect})" }
+        end
+      end
+    rescue ex
+      Log.debug { "feedback failed: #{ex.message}" }
     end
 
     private def handle_tray_command(cmd : String)
@@ -539,7 +551,7 @@ module Kirk
           return
         end
 
-        show_balloon("Settings saved", "kirk settings were updated.") if @cfg.show_save_notifications
+        show_balloon("Settings saved", "kirk settings were updated.")
       end
     end
 

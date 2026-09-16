@@ -63,6 +63,10 @@ module Kirk
 
     property start_minimized : Bool = true
     property show_save_notifications : Bool = true
+    # Chime on clip save (assets/clip.wav staged next to the exe).
+    # Together with show_save_notifications this is a 4-way choice:
+    # both on = notification + sound, either off, or both off = silent.
+    property play_save_sound : Bool = true
     property run_at_startup : Bool = false
     # Start capture at launch so a voice command or hotkey never finds an empty buffer.
     property auto_start_recording : Bool = true

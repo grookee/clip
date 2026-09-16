@@ -119,6 +119,7 @@ struct KirkSettings
   property system_audio_device : StaticArray(UInt16, 260) = StaticArray(UInt16, 260).new(0_u16)
   property mic_gain_pct : Int32 = 100
   property system_gain_pct : Int32 = 100
+  property play_save_sound : LibC::Int = 0
 end
 
 class VoiceSession

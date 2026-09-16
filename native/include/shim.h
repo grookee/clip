@@ -125,6 +125,7 @@ typedef struct {
   wchar_t  system_audio_device[KIRK_STR_LEN]; /* render endpoint; "" = default output */
   int32_t  mic_gain_pct;                  /* 0..200, 100 = unity */
   int32_t  system_gain_pct;               /* 0..200, 100 = unity */
+  int32_t  play_save_sound;               /* chime on clip save (Clip.wav) */
 } kirk_settings;
 
 /// Opens the settings dialog. Blocking modal loop; returns 1 on success.

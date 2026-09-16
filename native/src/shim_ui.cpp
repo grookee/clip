@@ -407,6 +407,24 @@ static const int res_w[] = {0, 1280, 1920, 2560, -1};
 static const int res_h[] = {0, 720, 1080, 1440, -1};
 static const int res_count = 5;
 
+// Clip-saved feedback: one 4-way combo driving the two ABI flags
+// (show_save_notifications x play_save_sound). Single control so the user
+// picks notification / sound / both / none in one place.
+static const wchar_t *feedback_names[] = {
+  L"Notification + sound",
+  L"Notification only",
+  L"Sound only",
+  L"Off (silent)",
+};
+static const int feedback_count = 4;
+
+static int feedback_sel_of(int toast, int sound) {
+  if (toast && sound) return 0;
+  if (toast) return 1;
+  if (sound) return 2;
+  return 3;
+}
+
 
 struct UI {
   HWND hwnd = nullptr;
@@ -437,7 +455,7 @@ struct UI {
 
   kirk_settings S;
   int micSel = 0, encSel = 0, presetSel = 2, resSel = 0;
-  int extraSel = 0, sysDevSel = 0;
+  int extraSel = 0, sysDevSel = 0, feedbackSel = 0;
   bool fpsCustom = false, vbrCustom = false, abrCustom = false;
   int clientW = 0, clientH = 0;
 
@@ -517,13 +535,18 @@ static LRESULT CALLBACK tip_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
       HDC dc = BeginPaint(h, &ps);
       RECT rc;
       GetClientRect(h, &rc);
-      int pad = g_ui ? g_ui->S_(12) : 12;
+      // Must match tip_show(): symmetric X/Y padding plus descender slack,
+      // otherwise the text rect is shorter than the measured font height
+      // and the bottom of the text clips.
+      int padX = g_ui ? g_ui->S_(12) : 12;
+      int padY = g_ui ? g_ui->S_(8) : 8;
       fill_round(dc, &rc, GV_BG1, g_ui ? g_ui->R_ctrl() : 6);
       frame_round(dc, &rc, GV_BG3, g_ui ? g_ui->R_ctrl() : 6, 1);
       if (g_tip_text) {
-        RECT tr = {pad, pad, rc.right - pad, rc.bottom - pad};
+        RECT tr = {padX, padY, rc.right - padX, rc.bottom - padY};
         HFONT ft = g_ui ? g_ui->fLbl : nullptr;
-        draw_text(dc, g_tip_text, &tr, GV_FG0, ft, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        draw_text(dc, g_tip_text, &tr, GV_FG0, ft,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
       }
       EndPaint(h, &ps);
       return 0;
@@ -561,9 +584,13 @@ static void tip_show(POINT anchor, const wchar_t *text, int field_id) {
   SelectObject(dc, old);
   ReleaseDC(g_ui->hwnd, dc);
 
-  int pad = g_ui->S_(8);
-  int w = sz.cx + pad * 2;
-  int h = sz.cy + pad * 2;
+  int padX = g_ui->S_(12);
+  int padY = g_ui->S_(8);
+  // Slack for descenders/antialiasing: GetTextExtent is tight, and a
+  // VCENTER blt in an exactly-sized rect clips g/j/y at the bottom.
+  int slack = g_ui->S_(4);
+  int w = sz.cx + padX * 2;
+  int h = sz.cy + padY * 2 + slack;
 
   int x = anchor.x + g_ui->S_(16);
   int y = anchor.y + g_ui->S_(16);
@@ -823,9 +850,11 @@ static void ui_layout(UI *u) {
   u->f.back().pflag = &u->S.run_at_startup;
   push_row(FT_TOGGLE, 13, L"Start minimized to tray");
   u->f.back().pflag = &u->S.start_minimized;
-  push_row(FT_TOGGLE, 14, L"Notify when a clip is saved");
-  u->f.back().pflag = &u->S.show_save_notifications;
-  add_info(14, L"Show a tray message every time a clip is saved.");
+  push_row(FT_COMBO, 30, L"Clip saved feedback");
+  u->f.back().items = new std::vector<std::wstring>();
+  for (int i = 0; i < feedback_count; i++) u->f.back().items->push_back(feedback_names[i]);
+  u->f.back().psel = &u->feedbackSel;
+  add_info(30, L"How kirk confirms a saved clip: Windows notification, chime sound, both, or silent.");
   push_row(FT_TOGGLE, 22, L"Start recording with the app");
   u->f.back().pflag = &u->S.auto_start_recording;
   add_info(22, L"Keep the replay buffer always on, so voice commands and hotkeys never find an empty buffer.");
@@ -972,7 +1001,7 @@ static LRESULT CALLBACK popup_proc(HWND h, UINT m, WPARAM w, LPARAM l);
 
 static void popup_close() {
   if (g_popup) {
-    ReleaseCapture();
+    if (GetCapture() == g_popup) ReleaseCapture();
     HWND owner = g_popup_ui ? g_popup_ui->hwnd : nullptr;
     DestroyWindow(g_popup);
     g_popup = nullptr;
@@ -1153,8 +1182,16 @@ static LRESULT CALLBACK popup_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
       POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
       RECT rc;
       GetClientRect(h, &rc);
+      // The popup holds mouse capture while open, so moves with the cursor
+      // still over the main dialog arrive here with outside-client coords.
+      // Closing on those killed every dropdown on the first mousemove after
+      // open (the "refuses to open" bug). Only clear hover; outside CLICKS
+      // still dismiss via WM_LBUTTONDOWN below.
       if (pt.x < 0 || pt.y < 0 || pt.x >= rc.right || pt.y >= rc.bottom) {
-        popup_close();
+        if (g_popup_hover != -1) {
+          g_popup_hover = -1;
+          InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
       }
       int idx = popup_row_at(pt.y);
@@ -1196,6 +1233,12 @@ static LRESULT CALLBACK popup_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
       return 0;
     }
     case WM_LBUTTONUP:
+      return 0;
+    case WM_KILLFOCUS:
+      popup_close();
+      return 0;
+    case WM_ACTIVATE:
+      if (LOWORD(w) == WA_INACTIVE) popup_close();
       return 0;
     case WM_KEYDOWN: {
       if (!u) break;
@@ -1246,7 +1289,7 @@ static LRESULT CALLBACK popup_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             COLORREF c = GV_FG1;
             if (i == cur) c = GV_ORG;
             else if (i == g_popup_hover) c = GV_FG0;
-            draw_text(dc, (*fd->items)[i].c_str(), &tr, c, u->fVal, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            draw_text(dc, (*fd->items)[i].c_str(), &tr, c, u->fVal, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
           }
           if (count * itemH > rc.bottom - padY * 2) {
             int trackX0 = rc.right - u->S_(10);
@@ -1569,6 +1612,7 @@ static void ui_reset_defaults(UI *u) {
   u->S.run_at_startup = 0;
   u->S.start_minimized = 1;
   u->S.show_save_notifications = 1;
+  u->S.play_save_sound = 1;
   u->S.voice_enabled = 1;
   u->S.verbose_logging = 0;
   u->S.auto_start_recording = 1;
@@ -1593,6 +1637,7 @@ static void ui_reset_defaults(UI *u) {
   u->micSel = 0;
   u->extraSel = 0;
   u->sysDevSel = 0;
+  u->feedbackSel = 0;
   u->fpsCustom = false; u->vbrCustom = false; u->abrCustom = false;
   for (auto &fd : u->f) {
     if (fd.type == FT_PRESET && fd.pval && fd.preset_vals) {
@@ -1709,6 +1754,13 @@ static void finish_dialog(UI *u, bool saved) {
     }
     if (u->S.mic_gain_pct < 0 || u->S.mic_gain_pct > 200) u->S.mic_gain_pct = 100;
     if (u->S.system_gain_pct < 0 || u->S.system_gain_pct > 200) u->S.system_gain_pct = 100;
+    // 4-way feedback combo -> two ABI flags.
+    {
+      int sel = u->feedbackSel;
+      if (sel < 0 || sel >= feedback_count) sel = 0;
+      u->S.show_save_notifications = (sel == 0 || sel == 1) ? 1 : 0;
+      u->S.play_save_sound = (sel == 0 || sel == 2) ? 1 : 0;
+    }
 
     if (!g_saved) g_saved = (kirk_settings *)calloc(1, sizeof(kirk_settings));
     if (g_saved) memcpy(g_saved, &u->S, sizeof(kirk_settings));
@@ -2583,6 +2635,8 @@ int kirk_ui_show(HWND owner, uint32_t settings_msg, const kirk_settings *initial
   u->micSel = 0;
   u->extraSel = 0;
   u->sysDevSel = 0;
+  u->feedbackSel = feedback_sel_of(initial->show_save_notifications,
+                                   initial->play_save_sound);
   {
     // WASAPI enumeration needs COM on this thread; init locally so the
     // dialog open path never depends on caller COM state.

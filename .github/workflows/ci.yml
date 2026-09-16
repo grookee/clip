@@ -71,7 +71,8 @@ jobs:
           }
 
       # The full staged runtime: exe, shim, ffmpeg and every DLL the build
-      # placed next to them (Crystal runtime + FFmpeg shared libs).
+      # placed next to them (Crystal runtime + FFmpeg shared libs), plus the
+      # clip-saved chime when present.
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -80,6 +81,7 @@ jobs:
             build/kirk.exe
             build/shim.dll
             build/ffmpeg.exe
+            build/clip.wav
             build/*.dll
           if-no-files-found: error
           retention-days: 14

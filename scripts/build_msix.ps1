@@ -51,6 +51,9 @@ Copy-Item (Join-Path $binDir "kirk.exe") $Stage -Force
 Copy-Item (Join-Path $binDir "shim.dll") $Stage -Force
 Copy-Item (Join-Path $binDir "ffmpeg.exe") $Stage -Force
 Copy-Item (Join-Path $binDir "*.dll") $Stage -Force
+# Clip-saved chime (best-effort: missing file = silent feedback).
+$chimeStaged = Join-Path $binDir "clip.wav"
+if (Test-Path $chimeStaged) { Copy-Item $chimeStaged $Stage -Force }
 
 # 3. Tile art, generated so the repo stays binary-free.
 Add-Type -AssemblyName System.Drawing
