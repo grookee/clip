@@ -72,6 +72,7 @@ the main knobs:
 | `mic_gain`           | mic loudness, `1.0` = unity (0..2)           |
 | `system_gain`        | system-audio loudness, `1.0` = unity (0..2)  |
 | `voice_enabled`      | voice commands on/off                    |
+| `voice_language`     | `"auto"` = follow the Windows default recognizer (fixes `0x80045052` on en-GB/de machines), or `"en-US"`/`"en-GB"` etc. to prefer that recognizer |
 | `voice_command`      | `;`-separated trigger phrases            |
 | `voice_confidence`   | accept floor, `0.01` = lenient (tune in Settings > Voice) |
 | `voice_cooldown_ms`  | repeat-command ignore window              |

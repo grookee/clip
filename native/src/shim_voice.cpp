@@ -24,6 +24,12 @@ struct kirk_voice_s {
   ISpRecoContext  *ctx;
   ISpRecoGrammar  *grammar;
   wchar_t         *input_desc;
+  // Recognizer selected at create time. reco_tag is always a usable BCP-47
+  // grammar language (falls back to en-US when the LANGID is unknown);
+  // reco_langid is 0 when unknown; reco_id is the SAPI token id ("" unknown).
+  unsigned         reco_langid;
+  wchar_t          reco_tag[16];
+  wchar_t         *reco_id;
 };
 
 static HRESULT g_voice_last_hr = S_OK;
@@ -64,7 +70,79 @@ static void kirk_voice_release_com(kirk_voice_handle h) {
   if (h->recog)   { h->recog->Release();     h->recog   = NULL; }
 }
 
-kirk_voice_handle kirk_voice_create(const wchar_t *device_id) {
+// Parses the SAPI "Language" attribute ("409", "409;809", ...) to a LANGID.
+// Takes the first value; returns 1 on success.
+static int kirk_parse_lang_attr(const wchar_t *s, unsigned *out) {
+  if (!s || !*s || !out) return 0;
+  wchar_t *end = NULL;
+  unsigned long v = wcstoul(s, &end, 16);
+  if (end == s || v == 0 || v > 0xFFFF) return 0;
+  *out = (unsigned)v;
+  return 1;
+}
+
+// Reads a recognizer token's language: Attributes/Language -> LANGID.
+static int kirk_reco_token_langid(ISpObjectToken *tok, unsigned *out) {
+  if (!tok || !out) return 0;
+  ISpDataKey *attrs = NULL;
+  if (FAILED(tok->OpenKey(L"Attributes", &attrs)) || !attrs) return 0;
+  LPWSTR val = NULL;
+  HRESULT hr = attrs->GetStringValue(L"Language", &val);
+  attrs->Release();
+  if (FAILED(hr) || !val) return 0;
+  int ok = kirk_parse_lang_attr(val, out);
+  CoTaskMemFree(val);
+  return ok;
+}
+
+static void kirk_set_reco_info(kirk_voice_handle h, unsigned langid, const wchar_t *token_id) {
+  if (!h) return;
+  h->reco_langid = langid;
+  // LANGID -> BCP-47 via the OS so every language maps correctly.
+  wchar_t tag[16] = {0};
+  int got = 0;
+  if (langid != 0) {
+    int n = GetLocaleInfoW(MAKELCID(langid, SORT_DEFAULT), LOCALE_SNAME, tag, 16);
+    if (n > 0 && tag[0]) got = 1;
+  }
+  const wchar_t *fallback = L"en-US";
+  wcsncpy(h->reco_tag, got ? tag : fallback, 15);
+  h->reco_tag[15] = 0;
+  free(h->reco_id);
+  h->reco_id = NULL;
+  if (token_id && *token_id) {
+    size_t n = wcslen(token_id) + 1;
+    h->reco_id = (wchar_t *)malloc(n * sizeof(wchar_t));
+    if (h->reco_id) wcscpy(h->reco_id, token_id);
+  }
+}
+
+// BCP-47 ("en-US", "en_US", "en") -> LANGID via the OS. Returns 1 on success.
+// "auto"/NULL/empty is not a language (returns 0).
+static int kirk_bcp47_to_langid(const wchar_t *hint, unsigned *out) {
+  if (!hint || !*hint || !out) return 0;
+  wchar_t norm[32] = {0};
+  size_t j = 0;
+  for (size_t i = 0; hint[i] && j + 1 < 32; i++) {
+    wchar_t c = hint[i];
+    if (c == L'_') c = L'-';
+    norm[j++] = towlower(c);
+  }
+  norm[j] = 0;
+  if (wcscmp(norm, L"auto") == 0) return 0;
+  wchar_t canonical[32] = {0};
+  wcsncpy(canonical, hint, 31);
+  for (size_t i = 0; canonical[i]; i++)
+    if (canonical[i] == L'_') canonical[i] = L'-';
+  LCID lcid = LocaleNameToLCID(canonical, 0);
+  if (lcid == 0) return 0;
+  unsigned langid = (unsigned)(lcid & 0xFFFF);
+  if (langid == 0) return 0;
+  *out = langid;
+  return 1;
+}
+
+kirk_voice_handle kirk_voice_create(const wchar_t *device_id, const wchar_t *lang_hint) {
   // device_hint is matched against SAPI input descriptions, else the SAPI
   // default token is used. SetInput must always be called: without it the
   // in-proc recognizer hears nothing and logs nothing.
@@ -78,6 +156,101 @@ kirk_voice_handle kirk_voice_create(const wchar_t *device_id) {
   kirk_voice_handle h = (kirk_voice_handle)calloc(1, sizeof(struct kirk_voice_s));
   if (!h) { recog->Release(); return NULL; }
   h->recog = recog;
+  kirk_set_reco_info(h, 0, NULL);
+
+  // Select the speech recognizer BEFORE SetInput/CreateRecoContext. Without
+  // SetRecognizer SAPI uses whatever default Windows happens to have (e.g.
+  // en-GB 809) while the app generates an en-US grammar -> LoadCmdFromFile
+  // fails with SPERR_LANGID_MISMATCH (0x80045052).
+  {
+    unsigned want = 0;
+    int have_want = kirk_bcp47_to_langid(lang_hint, &want);
+    ISpObjectTokenCategory *rcat = NULL;
+    hr = CoCreateInstance(CLSID_SpObjectTokenCategory, NULL, CLSCTX_INPROC_SERVER,
+                          IID_ISpObjectTokenCategory, (void **)&rcat);
+    if (SUCCEEDED(hr) && rcat) {
+      if (SUCCEEDED(rcat->SetId(SPCAT_RECOGNIZERS, FALSE))) {
+        IEnumSpObjectTokens *ret = NULL;
+        if (SUCCEEDED(rcat->EnumTokens(NULL, NULL, &ret)) && ret) {
+          ULONG rn = 0;
+          ret->GetCount(&rn);
+          ISpObjectToken *best = NULL, *primary = NULL, *first = NULL, *def = NULL;
+          unsigned best_lang = 0, primary_lang = 0, first_lang = 0, def_lang = 0;
+          wchar_t best_id[512] = {0}, primary_id[512] = {0}, first_id[512] = {0}, def_id_buf[512] = {0};
+          LPWSTR defId = NULL;
+          if (FAILED(rcat->GetDefaultTokenId(&defId))) defId = NULL;
+          for (ULONG i = 0; i < rn; i++) {
+            ISpObjectToken *t = NULL;
+            if (FAILED(ret->Next(1, &t, NULL)) || !t) continue;
+            unsigned lang = 0;
+            kirk_reco_token_langid(t, &lang);
+            LPWSTR tid = NULL;
+            t->GetId(&tid);
+            if (!first) {
+              first = t; first_lang = lang;
+              if (tid) wcsncpy(first_id, tid, 511);
+              CoTaskMemFree(tid);
+              continue;
+            }
+            if (defId && tid && wcscmp(tid, defId) == 0 && !def) {
+              def = t; def_lang = lang;
+              wcsncpy(def_id_buf, tid, 511);
+              CoTaskMemFree(tid);
+              continue;
+            }
+            if (have_want && lang == want && !best) {
+              best = t; best_lang = lang;
+              if (tid) wcsncpy(best_id, tid, 511);
+              CoTaskMemFree(tid);
+              continue;
+            }
+            if (have_want && !primary && lang != 0 &&
+                PRIMARYLANGID((WORD)lang) == PRIMARYLANGID((WORD)want)) {
+              primary = t; primary_lang = lang;
+              if (tid) wcsncpy(primary_id, tid, 511);
+              CoTaskMemFree(tid);
+              continue;
+            }
+            CoTaskMemFree(tid);
+            t->Release();
+          }
+          ret->Release();
+          ISpObjectToken *sel = NULL;
+          unsigned sel_lang = 0;
+          wchar_t sel_id[512] = {0};
+          if (have_want && best) {
+            sel = best; sel_lang = best_lang; wcsncpy(sel_id, best_id, 511);
+          } else if (have_want && primary) {
+            sel = primary; sel_lang = primary_lang; wcsncpy(sel_id, primary_id, 511);
+          } else if (!have_want && def) {
+            sel = def; sel_lang = def_lang; wcsncpy(sel_id, def_id_buf, 511);
+          } else if (def) {
+            // Explicit request with no match: stay on the default so an
+            // en-GB default + en-US request doesn't silently switch dialects;
+            // the grammar is still generated from the actual recognizer.
+            sel = def; sel_lang = def_lang; wcsncpy(sel_id, def_id_buf, 511);
+          } else if (have_want && first) {
+            sel = first; sel_lang = first_lang; wcsncpy(sel_id, first_id, 511);
+          } else if (first) {
+            sel = first; sel_lang = first_lang; wcsncpy(sel_id, first_id, 511);
+          }
+          // Release non-selected candidates.
+          ISpObjectToken *cands[4] = {best, primary, first, def};
+          for (int k = 0; k < 4; k++)
+            if (cands[k] && cands[k] != sel) cands[k]->Release();
+          if (sel) {
+            if (SUCCEEDED(recog->SetRecognizer(sel)))
+              kirk_set_reco_info(h, sel_lang, sel_id[0] ? sel_id : NULL);
+            else
+              kirk_set_reco_info(h, sel_lang, sel_id[0] ? sel_id : NULL);
+            sel->Release();
+          }
+          if (defId) CoTaskMemFree(defId);
+        }
+      }
+      rcat->Release();
+    }
+  }
 
   ISpObjectToken *chosen = NULL;
   wchar_t chosen_desc[256] = {0};
@@ -177,6 +350,8 @@ kirk_voice_handle kirk_voice_create(const wchar_t *device_id) {
       // points at "no input" instead of a stale S_OK.
       g_voice_last_hr = (HRESULT)0x8004503A; // SPERR_NOT_FOUND
       recog->Release();
+      free(h->input_desc);
+      free(h->reco_id);
       free(h);
       return NULL;
     }
@@ -186,6 +361,8 @@ kirk_voice_handle kirk_voice_create(const wchar_t *device_id) {
     if (FAILED(hr)) {
       chosen->Release();
       recog->Release();
+      free(h->input_desc);
+      free(h->reco_id);
       free(h);
       return NULL;
     }
@@ -211,6 +388,7 @@ kirk_voice_handle kirk_voice_create(const wchar_t *device_id) {
     g_voice_last_hr = hr;
     kirk_voice_release_com(h);
     free(h->input_desc);
+    free(h->reco_id);
     free(h);
     return NULL;
   }
@@ -231,6 +409,7 @@ void kirk_voice_destroy(kirk_voice_handle h) {
   kirk_voice_stop(h);
   kirk_voice_release_com(h);
   free(h->input_desc);
+  free(h->reco_id);
   free(h);
 }
 
@@ -242,6 +421,21 @@ HRESULT kirk_voice_last_hresult(void) {
 const wchar_t *kirk_voice_input_name(kirk_voice_handle h) {
   if (!h || !h->input_desc) return L"(none)";
   return h->input_desc;
+}
+
+unsigned kirk_voice_recognizer_langid(kirk_voice_handle h) {
+  if (!h) return 0;
+  return h->reco_langid;
+}
+
+const wchar_t *kirk_voice_recognizer_tag(kirk_voice_handle h) {
+  if (!h || !h->reco_tag[0]) return L"en-US";
+  return h->reco_tag;
+}
+
+const wchar_t *kirk_voice_recognizer_id(kirk_voice_handle h) {
+  if (!h || !h->reco_id) return L"";
+  return h->reco_id;
 }
 
 int kirk_voice_load_grammar(kirk_voice_handle h, const wchar_t *srgs_path) {

@@ -54,12 +54,88 @@ module Kirk
       @session = nil
     end
 
+    getter voice_language : String = "auto"
+
     def apply_settings(cfg : Kirk::Settings)
       @cooldown_ms = cfg.voice_cooldown_ms
       @confidence_min = cfg.voice_confidence
       @isolation_ms = cfg.voice_isolation_ms
       @high_confidence = cfg.voice_high_confidence
       @enabled = cfg.voice_enabled
+      @voice_language = Voice.normalize_lang(cfg.voice_language)
+    end
+
+    # Normalizes the voice_language setting: "auto" (default) follows the
+    # default SAPI recognizer; otherwise a BCP-47 tag such as "en-US".
+    # Underscores are accepted ("en_US"); empty/invalid falls back to "auto".
+    def self.normalize_lang(raw : String) : String
+      s = raw.strip.gsub("_", "-")
+      return "auto" if s.empty? || s.downcase == "auto"
+      parts = s.split("-")
+      return "auto" unless parts[0].size == 2 && parts[0].chars.all?(&.letter?)
+      lang = parts[0].downcase
+      if parts.size == 1
+        return lang == "en" ? "en-US" : lang
+      end
+      return "auto" unless parts[1].size == 2 && parts[1].chars.all?(&.letter?)
+      "#{lang}-#{parts[1].upcase}"
+    end
+
+    # LANGID (from SAPI's Language attribute, e.g. 0x409) -> BCP-47 grammar
+    # language. Used as a fallback when the native tag query is unavailable;
+    # the live path takes the tag straight from the selected recognizer.
+    def self.bcp47_for_langid(langid : UInt32) : String
+      case langid & 0xFFFF
+      when 0x0409 then "en-US"
+      when 0x0809 then "en-GB"
+      when 0x0C09 then "en-AU"
+      when 0x1009 then "en-CA"
+      when 0x1409 then "en-NZ"
+      when 0x1809 then "en-IE"
+      when 0x1C09 then "en-ZA"
+      when 0x0407 then "de-DE"
+      when 0x040C then "fr-FR"
+      when 0x040A then "es-ES"
+      when 0x080A then "es-MX"
+      when 0x0410 then "it-IT"
+      when 0x0411 then "ja-JP"
+      when 0x0412 then "ko-KR"
+      when 0x0804 then "zh-CN"
+      when 0x0404 then "zh-TW"
+      when 0x0416 then "pt-BR"
+      when 0x0816 then "pt-PT"
+      when 0x0413 then "nl-NL"
+      when 0x041D then "sv-SE"
+      when 0x0415 then "pl-PL"
+      when 0x0419 then "ru-RU"
+      else
+        case langid & 0x3FF
+        when 0x09 then "en-US"
+        when 0x07 then "de-DE"
+        when 0x0C then "fr-FR"
+        when 0x0A then "es-ES"
+        when 0x10 then "it-IT"
+        when 0x11 then "ja-JP"
+        when 0x12 then "ko-KR"
+        when 0x04 then "zh-CN"
+        when 0x16 then "pt-BR"
+        when 0x13 then "nl-NL"
+        when 0x1D then "sv-SE"
+        when 0x15 then "pl-PL"
+        when 0x19 then "ru-RU"
+        else          "en-US"
+        end
+      end
+    end
+
+    def self.hresult_name(hr : UInt32) : String
+      case hr
+      when 0x80045052_u32 then "SPERR_LANGID_MISMATCH"
+      when 0x8004503A_u32 then "SPERR_NOT_FOUND"
+      when 0x80004003_u32 then "E_POINTER"
+      when 0x80070005_u32 then "E_ACCESSDENIED"
+      else                     "unknown"
+      end
     end
 
     # ";"-separated: "," fragments "Kirk, clip that!" into unmatchable pieces,
@@ -97,7 +173,7 @@ module Kirk
       @enabled && !@session.nil?
     end
 
-    def build_grammar(phrases : Array(String))
+    def build_grammar(phrases : Array(String), lang : String = "en-US")
       # "Kirk, clip that!" and "Kirk clip that" are the same token sequence to SAPI.
       seen = Set(String).new
       items = phrases.compact_map do |p|
@@ -106,9 +182,14 @@ module Kirk
         seen << g.downcase
         "      <item>#{xml_escape(g)}</item>"
       end.join("\n")
+      # The grammar language MUST match the selected SAPI recognizer's
+      # language, or LoadCmdFromFile fails with SPERR_LANGID_MISMATCH
+      # (0x80045052) - e.g. default recognizer en-GB (809) vs en-US grammar.
+      grammar_lang = Voice.normalize_lang(lang)
+      grammar_lang = "en-US" if grammar_lang == "auto"
       xml = <<-SRGS
       <?xml version="1.0" encoding="UTF-8"?>
-      <grammar version="1.0" xml:lang="en-US" root="Commands" xmlns="http://www.w3.org/2001/06/grammar">
+      <grammar version="1.0" xml:lang="#{xml_escape(grammar_lang)}" root="Commands" xmlns="http://www.w3.org/2001/06/grammar">
         <rule id="Commands" scope="public">
           <one-of>
         #{items}
@@ -127,7 +208,10 @@ module Kirk
     # Idempotent. device_hint is matched against SAPI input descriptions, else
     # the SAPI default input is used. capture_audio only controls the ffmpeg
     # dshow mic baked into recordings.
-    def start(persist_dir : String, phrases : Array(String), device_hint : String? = nil)
+    # The SRGS grammar language always follows the actually-selected SAPI
+    # recognizer (queried after create), so a non-US default (e.g. en-GB 809
+    # or de-DE) no longer fails with SPERR_LANGID_MISMATCH (0x80045052).
+    def start(persist_dir : String, phrases : Array(String), device_hint : String? = nil, lang_hint : String? = nil)
       if !@enabled
         Log.info { "voice: not starting (voice commands OFF)" }
         return
@@ -137,23 +221,36 @@ module Kirk
         return
       end
 
+      want_lang = Voice.normalize_lang(lang_hint || @voice_language)
       FileUtils.mkdir_p(persist_dir)
       @grammar_path = File.join(persist_dir, "voice.srgs")
-      path = build_grammar(phrases)
       @phrases_normalized = Set(String).new(phrases.map { |p| Voice.normalize(p) }.reject(&.empty?))
       if @confidence_min > 0.2
         Log.warn { "voice: confidence floor #{@confidence_min} is very strict on the SAPI scale (clear commands decode around 0.02-0.05); commands may never fire - lower it in Settings > Voice commands" }
       end
-      Log.info { "voice: starting (#{phrases.size} phrases, conf_min=#{@confidence_min}, high=#{@high_confidence}, cooldown=#{@cooldown_ms}ms, isolation=#{@isolation_ms}ms, grammar=#{path}, mic_hint=#{device_hint.inspect})" }
-      phrases.each { |p| Log.debug { "voice: phrase '#{p}' -> grammar '#{Voice.grammar_text(p)}'" } }
 
-      session = win32_voice_create(device_hint)
+      session = win32_voice_create(device_hint, want_lang)
       unless session.valid?
-        Log.error { "voice: could not create SAPI session (listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)}). Check: Windows Speech Recognition / en-US speech pack installed, Settings > Privacy > Microphone allowed, and a SAPI input exists (see README voice troubleshooting)." }
+        hr = win32_voice_last_hresult.to_u32!
+        Log.error { "voice: could not create SAPI session (listening INACTIVE, hr=0x#{hr.to_s(16)} (#{Voice.hresult_name(hr)})). Check: Windows Speech Recognition / speech pack installed, Settings > Privacy > Microphone allowed, and a SAPI input exists (see README voice troubleshooting)." }
         win32_voice_destroy(session)
         @session = nil
         return
       end
+      reco_tag, reco_langid, reco_id = begin
+        {session.recognizer_tag, session.recognizer_langid, session.recognizer_id}
+      rescue
+        {"en-US", 0_u32, ""}
+      end
+      reco_tag = "en-US" if reco_tag.strip.empty?
+      # An explicit request that matches nothing stays on the default
+      # recognizer; the grammar still follows the actual recognizer.
+      if want_lang != "auto" && want_lang.downcase != reco_tag.downcase
+        Log.warn { "voice: requested language #{want_lang} unavailable (recognizer #{reco_id} is #{reco_tag}); grammar follows the recognizer - set voice_language to \"auto\" or install the #{want_lang} speech pack" }
+      end
+      path = build_grammar(phrases, reco_tag)
+      Log.info { "voice: starting (#{phrases.size} phrases, conf_min=#{@confidence_min}, high=#{@high_confidence}, cooldown=#{@cooldown_ms}ms, isolation=#{@isolation_ms}ms, grammar=#{path}, grammar_lang=#{reco_tag}, recognizer=#{reco_id} lang=#{reco_tag} (0x#{reco_langid.to_s(16)}), mic_hint=#{device_hint.inspect})" }
+      phrases.each { |p| Log.debug { "voice: phrase '#{p}' -> grammar '#{Voice.grammar_text(p)}'" } }
       Log.info { "voice: audio input bound to '#{session.input_name}'" }
       unless session.load_grammar(path)
         detail = begin
@@ -161,20 +258,24 @@ module Kirk
         rescue
           "exists=? size=?"
         end
-        Log.error { "voice: grammar load FAILED for #{path} (#{detail}, listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)})" }
+        hr = win32_voice_last_hresult.to_u32!
+        name = Voice.hresult_name(hr)
+        hint = hr == 0x80045052_u32 ? "grammar language must match the SAPI recognizer (grammar_lang=#{reco_tag} recognizer=#{reco_id}); try voice_language \"auto\" or install the matching speech pack" : "see README voice troubleshooting"
+        Log.error { "voice: grammar load FAILED for #{path} (#{detail}, grammar_lang=#{reco_tag}, recognizer=#{reco_id}, listening INACTIVE, hr=0x#{hr.to_s(16)} (#{name}); #{hint})" }
         win32_voice_destroy(session)
         @session = nil
         return
       end
-      Log.info { "voice: grammar loaded (#{phrases.size} phrases)" }
+      Log.info { "voice: grammar loaded (#{phrases.size} phrases, lang=#{reco_tag})" }
       unless session.start
-        Log.error { "voice: recognizer start FAILED (listening INACTIVE, hr=0x#{win32_voice_last_hresult.to_u32!.to_s(16)})" }
+        hr = win32_voice_last_hresult.to_u32!
+        Log.error { "voice: recognizer start FAILED (listening INACTIVE, hr=0x#{hr.to_s(16)} (#{Voice.hresult_name(hr)}))" }
         win32_voice_destroy(session)
         @session = nil
         return
       end
       @session = session
-      Log.info { "voice: listening ACTIVE on '#{session.input_name}'" }
+      Log.info { "voice: listening ACTIVE on '#{session.input_name}' (recognizer #{reco_tag})" }
     end
 
     def stop

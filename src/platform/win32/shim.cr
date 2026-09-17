@@ -29,9 +29,12 @@ lib LibShim
   fun kirk_ui_last_saved : Void*
   fun kirk_set_run_at_startup(cmdline : WChar*, enabled : LibC::Int) : LibC::Int
 
-  fun kirk_voice_create(device_hint : WChar*) : Void*
+  fun kirk_voice_create(device_hint : WChar*, lang_hint : WChar*) : Void*
   fun kirk_voice_last_hresult : LibC::Long
   fun kirk_voice_input_name(handle : Void*) : WChar*
+  fun kirk_voice_recognizer_langid(handle : Void*) : LibC::UInt
+  fun kirk_voice_recognizer_tag(handle : Void*) : WChar*
+  fun kirk_voice_recognizer_id(handle : Void*) : WChar*
   fun kirk_voice_destroy(handle : Void*)
   fun kirk_voice_load_grammar(handle : Void*, srgs_path : WChar*) : LibC::Int
   fun kirk_voice_start(handle : Void*) : LibC::Int
@@ -187,6 +190,24 @@ class VoiceSession
     h = native_handle!
     Win32.wstr_to_string(LibShim.kirk_voice_input_name(h))
   end
+
+  # LANGID of the SAPI recognizer chosen at create time (0 = unknown).
+  def recognizer_langid : UInt32
+    h = native_handle!
+    LibShim.kirk_voice_recognizer_langid(h).to_u32
+  end
+
+  # BCP-47 tag matching the chosen recognizer (e.g. "en-US", "en-GB").
+  # The native side always returns a usable tag ("en-US" fallback).
+  def recognizer_tag : String
+    h = native_handle!
+    Win32.wstr_to_string(LibShim.kirk_voice_recognizer_tag(h))
+  end
+
+  def recognizer_id : String
+    h = native_handle!
+    Win32.wstr_to_string(LibShim.kirk_voice_recognizer_id(h))
+  end
 end
 
 def win32_voice_counters : {UInt64, UInt64, UInt64, UInt64}
@@ -273,17 +294,24 @@ end
 
 # A NULL return means no input could be bound (silent engine): the native side
 # always binds an input via SetInput.
-def win32_voice_create(device_hint : String? = nil) : VoiceSession
+# lang_hint selects the SAPI recognizer ("auto" = default recognizer, else a
+# BCP-47 tag such as "en-US"). The SRGS grammar must declare the language of
+# the actually-selected recognizer (see VoiceSession#recognizer_tag), or SAPI
+# rejects it with SPERR_LANGID_MISMATCH (0x80045052).
+def win32_voice_create(device_hint : String? = nil, lang_hint : String? = nil) : VoiceSession
   Win32.ole_initialize(0x0)
-  if hint = device_hint
-    if hint.strip.empty?
-      h = LibShim.kirk_voice_create(nil)
-    else
-      h = LibShim.kirk_voice_create(Win32.to_wstr(hint))
-    end
+  device_ptr = if hint = device_hint
+    hint.strip.empty? ? Pointer(LibShim::WChar).null : Win32.to_wstr(hint)
   else
-    h = LibShim.kirk_voice_create(nil)
+    Pointer(LibShim::WChar).null
   end
+  lang_ptr = if lang = lang_hint
+    s = lang.strip
+    (s.empty? || s.downcase == "auto") ? Pointer(LibShim::WChar).null : Win32.to_wstr(s)
+  else
+    Pointer(LibShim::WChar).null
+  end
+  h = LibShim.kirk_voice_create(device_ptr, lang_ptr)
   VoiceSession.new(h)
 end
 

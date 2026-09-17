@@ -55,10 +55,15 @@ module Kirk
     # Confidence that bypasses the burst gate (clamped to >= floor at use).
     property voice_high_confidence : Float64 = 0.5
     property voice_command : String = "Kirk, clip that!;" \
-                                      "Kirk clip that;" \
-                                      "Kirk, clip it!;" \
-                                      "Hey Kirk, clip that!;" \
-                                      "Clip that, Kirk!"
+                                       "Kirk clip that;" \
+                                       "Kirk, clip it!;" \
+                                       "Hey Kirk, clip that!;" \
+                                       "Clip that, Kirk!"
+    # SAPI recognizer language: "auto" follows the default recognizer (and
+    # the grammar follows it too), otherwise a BCP-47 tag such as "en-US"
+    # prefers a recognizer with that language. Prevents SPERR_LANGID_MISMATCH
+    # (0x80045052) when the Windows default is e.g. en-GB (809) or de-DE.
+    property voice_language : String = "auto"
 
     property hotkey_clip_mod : Int32 = 0
     property hotkey_clip_vk : Int32 = 0x77
@@ -141,6 +146,7 @@ module Kirk
       self.voice_high_confidence = 0.5 if voice_high_confidence < 0.0 || voice_high_confidence > 1.0
       self.voice_cooldown_ms = 2500 if voice_cooldown_ms < 250 || voice_cooldown_ms > 15000
       self.voice_isolation_ms = 1200 if voice_isolation_ms < 0 || voice_isolation_ms > 10000
+      self.voice_language = Kirk::Voice.normalize_lang(voice_language)
       self
     end
 

@@ -47,7 +47,26 @@ typedef struct kirk_voice_s *kirk_voice_handle;
 /// Creates a recognizer. device_hint is matched against SAPI input descriptions,
 /// falling back to the SAPI default input when NULL/empty/unmatched. The input
 /// is always bound via SetInput; returns NULL when no input could be bound.
-KIRK_SHIM_API kirk_voice_handle kirk_voice_create(const wchar_t *device_hint);
+/// lang_hint selects the speech recognizer: NULL/empty/"auto" keeps SAPI's
+/// default recognizer, otherwise a BCP-47 tag such as L"en-US" prefers a
+/// recognizer with that language (exact LANGID, else same primary language,
+/// else the default). The grammar passed to kirk_voice_load_grammar must
+/// declare the same language as the selected recognizer - query it with
+/// kirk_voice_recognizer_tag() - or SAPI fails with SPERR_LANGID_MISMATCH.
+KIRK_SHIM_API kirk_voice_handle kirk_voice_create(const wchar_t *device_hint, const wchar_t *lang_hint);
+
+/// LANGID (e.g. 0x409 for en-US) of the recognizer selected at create time.
+/// Returns 0 when unknown.
+KIRK_SHIM_API unsigned kirk_voice_recognizer_langid(kirk_voice_handle h);
+
+/// BCP-47 tag (e.g. L"en-US") matching the selected recognizer. Valid until
+/// handle destroy; do not free. Returns L"en-US" when unknown so callers
+/// always have a usable grammar language.
+KIRK_SHIM_API const wchar_t *kirk_voice_recognizer_tag(kirk_voice_handle h);
+
+/// SAPI token id of the selected recognizer (e.g. "...MS-1033-80-DESK").
+/// Valid until handle destroy; do not free. Returns L"" when unknown.
+KIRK_SHIM_API const wchar_t *kirk_voice_recognizer_id(kirk_voice_handle h);
 
 /// Last failure HRESULT from create/load/start (0 when healthy).
 KIRK_SHIM_API long kirk_voice_last_hresult(void);

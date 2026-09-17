@@ -107,7 +107,7 @@ module Kirk
     def run : Int32
       Application.instance = self
 
-      Log.info { "kirk starting (cwd=#{Dir.current}, voice_enabled=#{@cfg.voice_enabled}, conf=#{@cfg.voice_confidence}/high=#{@cfg.voice_high_confidence}, cooldown=#{@cfg.voice_cooldown_ms}ms, isolation=#{@cfg.voice_isolation_ms}ms, mic=#{@cfg.mic_device.inspect})" }
+      Log.info { "kirk starting (cwd=#{Dir.current}, voice_enabled=#{@cfg.voice_enabled}, voice_lang=#{@cfg.voice_language}, conf=#{@cfg.voice_confidence}/high=#{@cfg.voice_high_confidence}, cooldown=#{@cfg.voice_cooldown_ms}ms, isolation=#{@cfg.voice_isolation_ms}ms, mic=#{@cfg.mic_device.inspect})" }
 
       wc = Win32::User32::WNDCLASSW.new
       wc.lpfn_wnd_proc = ->Application.wnd_proc(Win32::HWND, UInt32, Win32::WPARAM, Win32::LPARAM)
@@ -408,8 +408,16 @@ module Kirk
     private def log_voice_diagnostics
       ok_r, recos = win32_list_speech_recognizers
       ok_a, inputs = win32_list_sapi_audio_inputs
-      Log.info { "voice: recognizers ok=#{ok_r} count=#{recos.size}#{recos.empty? ? "" : " (" + recos.map(&.name).join("; ") + ")"}" }
+      Log.info { "voice: recognizers ok=#{ok_r} count=#{recos.size}#{recos.empty? ? "" : " (" + recos.map { |r| "#{r.name} [#{r.id}]" }.join("; ") + ")"}" }
       Log.info { "voice: sapi inputs ok=#{ok_a} count=#{inputs.size}#{inputs.empty? ? "" : " (" + inputs.map(&.name).join("; ") + ")"}" }
+      if v = @voice
+        if s = v.session
+          begin
+            Log.info { "voice: selected recognizer #{s.recognizer_id} lang=#{s.recognizer_tag} (0x#{s.recognizer_langid.to_s(16)}) input='#{s.input_name}'" }
+          rescue
+          end
+        end
+      end
     end
 
     # On voice start failure, checks whether a speech prerequisite is missing
@@ -595,6 +603,7 @@ module Kirk
       # silently dropped command/confidence/cooldown/mic edits.
       if old.voice_enabled != @cfg.voice_enabled ||
          old.voice_command != @cfg.voice_command ||
+         old.voice_language != @cfg.voice_language ||
          old.voice_confidence != @cfg.voice_confidence ||
          old.voice_high_confidence != @cfg.voice_high_confidence ||
          old.voice_cooldown_ms != @cfg.voice_cooldown_ms ||
